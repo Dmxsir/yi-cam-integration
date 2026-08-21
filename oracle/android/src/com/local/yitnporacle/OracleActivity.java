@@ -59,7 +59,9 @@ public final class OracleActivity extends Activity {
         @Override
         public void run() {
             boolean initialized = false;
-            try (Socket socket = connectHost()) {
+            Socket socket = null;
+            try {
+                socket = connectHost();
                 input = new DataInputStream(socket.getInputStream());
                 output = new DataOutputStream(socket.getOutputStream());
                 event("oracle_ready", new JSONObject());
@@ -238,7 +240,16 @@ public final class OracleActivity extends Activity {
                     } catch (Throwable ignored) {}
                 }
                 try { event("oracle_finished", new JSONObject()); } catch (Throwable ignored) {}
+
+                // Keep the host connection alive until all shutdown diagnostics have
+                // been emitted. Closing it earlier caused the Linux host to observe
+                // EOF even after a completely successful PPPP/TNP/video session.
                 clearSecrets();
+                input = null;
+                output = null;
+                if (socket != null) {
+                    try { socket.close(); } catch (Throwable ignored) {}
+                }
             }
         }
 
