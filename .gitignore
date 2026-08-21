@@ -1,0 +1,20 @@
+.analysis/
+.tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# Never commit local credentials or captured account data.
+.env
+.env.local
+captures/
+oracle/android/build/
+current-client/
+current-client-decompiled/
+current-client-full/
+current-native-analysis/
+com.ants360.yicamera.international.apk
+*.secrets.json
+yi-cloud-*.json
