@@ -38,6 +38,7 @@ public final class OracleActivity extends Activity {
         private static final int HOST_PORT = 27183;
         private static final int SET_RESOLUTION = 4881;
         private static final int START_REALTIME = 9029;
+        private static final int STARTUP_PROBE = 768;
         private static final int STOP_LIVE = 767;
         private static final char[] NONCE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
 
@@ -123,30 +124,37 @@ public final class OracleActivity extends Activity {
                 event("PPPP_Check", checked);
                 if (checkResult != 0) throw new IllegalStateException("PPPP check failed");
 
+                // Phase 2C.3 isolates one behavioral difference from the failed oracle:
+                // the successful older official client sends 4881 -> 9029 -> 768 before
+                // it waits for the first channel-0 response. Keep every other transport,
+                // authentication, version and connection input unchanged.
                 int resolutionUseCount = startUseCount - 1;
                 byte[] resolutionPayload = new byte[8];
                 putInt(resolutionPayload, 0, resolution);
                 putInt(resolutionPayload, 4, resolutionUseCount);
-                int resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
-                CommandResponse authentication = readCommandResponse();
-                if (authentication.version != tnpApplicationVersion) {
-                    tnpApplicationVersion = authentication.version;
-                    event("tnp_application_version_detected", new JSONObject().put("value", tnpApplicationVersion & 0xff));
-                    resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
-                    authentication = readCommandResponse();
-                }
-                JSONObject auth = new JSONObject();
-                auth.put("authResult", authentication.authResult);
-                auth.put("responseCommand", authentication.commandType);
-                auth.put("responseCommandNumber", authentication.commandNumber);
-                auth.put("requestCommandNumber", resolutionCommandNumber);
-                auth.put("tnpApplicationVersion", authentication.version & 0xff);
-                event("TNP_authentication", auth);
-                if (authentication.authResult != 0) throw new SecurityException("TNP authentication failed");
-
                 byte[] startPayload = new byte[] {(byte) startUseCount, (byte) resolution, 1, 0};
+                byte[] startupProbePayload = new byte[8];
+
+                long burstStarted = System.nanoTime();
+                int resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
                 int startWrite = sendCommand(START_REALTIME, startPayload);
                 liveStarted = true;
+                int probeWrite = sendCommand(STARTUP_PROBE, startupProbePayload);
+                event("startup_burst", new JSONObject()
+                        .put("command1", SET_RESOLUTION)
+                        .put("command1Number", resolutionCommandNumber)
+                        .put("command1PayloadLength", resolutionPayload.length)
+                        .put("command2", START_REALTIME)
+                        .put("command2Number", startWrite)
+                        .put("command2PayloadLength", startPayload.length)
+                        .put("command2UseCount", startUseCount)
+                        .put("command2Resolution", resolution)
+                        .put("command3", STARTUP_PROBE)
+                        .put("command3Number", probeWrite)
+                        .put("command3PayloadLength", startupProbePayload.length)
+                        .put("blockingReadBetweenCommands", false)
+                        .put("tnpApplicationVersion", tnpApplicationVersion & 0xff)
+                        .put("elapsedMillis", (System.nanoTime() - burstStarted) / 1_000_000L));
                 event("realtime_start", new JSONObject()
                         .put("command", START_REALTIME)
                         .put("channel", 0)
@@ -157,11 +165,26 @@ public final class OracleActivity extends Activity {
                         .put("commandVersion", 1)
                         .put("reserved", 0));
 
+                // Start video readers before the first blocking channel-0 read so the
+                // ~80-110 ms official video response window cannot be missed.
                 reading.set(true);
                 Thread channel2 = new Thread(() -> readFrames((byte) 2), "yi-channel-2");
                 Thread channel3 = new Thread(() -> readFrames((byte) 3), "yi-channel-3");
                 channel2.start();
                 channel3.start();
+
+                CommandResponse authentication = readCommandResponse();
+                if (authentication.version != tnpApplicationVersion) {
+                    throw new IllegalStateException("Unexpected TNP application version in controlled retry");
+                }
+                JSONObject auth = new JSONObject();
+                auth.put("authResult", authentication.authResult);
+                auth.put("responseCommand", authentication.commandType);
+                auth.put("responseCommandNumber", authentication.commandNumber);
+                auth.put("requestCommandNumber", resolutionCommandNumber);
+                auth.put("tnpApplicationVersion", authentication.version & 0xff);
+                event("TNP_authentication", auth);
+                if (authentication.authResult != 0) throw new SecurityException("TNP authentication failed");
 
                 long waitDeadline = System.nanoTime() + 20_000_000_000L;
                 while (firstIFrameAt.get() == 0 && System.nanoTime() < waitDeadline) Thread.sleep(50);
