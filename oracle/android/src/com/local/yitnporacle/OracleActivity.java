@@ -38,7 +38,7 @@ public final class OracleActivity extends Activity {
         private static final int HOST_PORT = 27183;
         private static final int SET_RESOLUTION = 4881;
         private static final int START_REALTIME = 9029;
-        private static final int STARTUP_PROBE = 768;
+        private static final int START_AUDIO = 768;
         private static final int STOP_LIVE = 767;
         private static final char[] NONCE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
 
@@ -133,13 +133,19 @@ public final class OracleActivity extends Activity {
                 putInt(resolutionPayload, 0, resolution);
                 putInt(resolutionPayload, 4, resolutionUseCount);
                 byte[] startPayload = new byte[] {(byte) startUseCount, (byte) resolution, 1, 0};
-                byte[] startupProbePayload = new byte[8];
+                byte[] audioPayload = new byte[8];
 
+                // Do not emit host-side diagnostics between these writes. The official
+                // capture carries all three TNP units in one DRW burst; suppressing the
+                // event() flushes here gives the unchanged native PPPP library the best
+                // chance to preserve the same immediate/coalesced wire behavior.
                 long burstStarted = System.nanoTime();
-                int resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
-                int startWrite = sendCommand(START_REALTIME, startPayload);
+                int resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload, false);
+                int startWrite = sendCommand(START_REALTIME, startPayload, false);
                 liveStarted = true;
-                int probeWrite = sendCommand(STARTUP_PROBE, startupProbePayload);
+                int audioWrite = sendCommand(START_AUDIO, audioPayload, false);
+                long burstElapsedMicros = (System.nanoTime() - burstStarted) / 1_000L;
+
                 event("startup_burst", new JSONObject()
                         .put("command1", SET_RESOLUTION)
                         .put("command1Number", resolutionCommandNumber)
@@ -149,12 +155,15 @@ public final class OracleActivity extends Activity {
                         .put("command2PayloadLength", startPayload.length)
                         .put("command2UseCount", startUseCount)
                         .put("command2Resolution", resolution)
-                        .put("command3", STARTUP_PROBE)
-                        .put("command3Number", probeWrite)
-                        .put("command3PayloadLength", startupProbePayload.length)
+                        .put("command3", START_AUDIO)
+                        .put("command3Number", audioWrite)
+                        .put("command3PayloadLength", audioPayload.length)
+                        .put("command3Meaning", "AUDIOSTART")
                         .put("blockingReadBetweenCommands", false)
+                        .put("diagnosticFlushBetweenCommands", false)
+                        .put("ppppWriteCount", 3)
                         .put("tnpApplicationVersion", tnpApplicationVersion & 0xff)
-                        .put("elapsedMillis", (System.nanoTime() - burstStarted) / 1_000_000L));
+                        .put("elapsedMicros", burstElapsedMicros));
                 event("realtime_start", new JSONObject()
                         .put("command", START_REALTIME)
                         .put("channel", 0)
@@ -165,8 +174,9 @@ public final class OracleActivity extends Activity {
                         .put("commandVersion", 1)
                         .put("reserved", 0));
 
-                // Start video readers before the first blocking channel-0 read so the
-                // ~80-110 ms official video response window cannot be missed.
+                // Start video readers before the first blocking channel-0 read. The
+                // successful official session produced channel-2 data at ~81 ms, so the
+                // readers are armed immediately after the three-command burst.
                 reading.set(true);
                 Thread channel2 = new Thread(() -> readFrames((byte) 2), "yi-channel-2");
                 Thread channel3 = new Thread(() -> readFrames((byte) 3), "yi-channel-3");
@@ -174,6 +184,7 @@ public final class OracleActivity extends Activity {
                 channel3.start();
 
                 CommandResponse authentication = readCommandResponse();
+                long firstResponseLatencyMicros = (System.nanoTime() - burstStarted) / 1_000L;
                 if (authentication.version != tnpApplicationVersion) {
                     throw new IllegalStateException("Unexpected TNP application version in controlled retry");
                 }
@@ -183,6 +194,7 @@ public final class OracleActivity extends Activity {
                 auth.put("responseCommandNumber", authentication.commandNumber);
                 auth.put("requestCommandNumber", resolutionCommandNumber);
                 auth.put("tnpApplicationVersion", authentication.version & 0xff);
+                auth.put("responseLatencyMicros", firstResponseLatencyMicros);
                 event("TNP_authentication", auth);
                 if (authentication.authResult != 0) throw new SecurityException("TNP authentication failed");
 
@@ -255,6 +267,10 @@ public final class OracleActivity extends Activity {
         }
 
         private int sendCommand(int command, byte[] payload) throws Exception {
+            return sendCommand(command, payload, true);
+        }
+
+        private int sendCommand(int command, byte[] payload, boolean emitWriteEvent) throws Exception {
             String account = "admin";
             String commandPassword = password;
             if (encrypted) {
@@ -280,13 +296,18 @@ public final class OracleActivity extends Activity {
             System.arraycopy(body, 0, unit, 8, body.length);
             long started = System.nanoTime();
             int result = PPPP_APIs.PPPP_Write(handle, (byte) 0, unit, unit.length);
-            JSONObject write = callResult(result, started);
-            write.put("channel", 0);
-            write.put("bufferLength", unit.length);
-            write.put("command", command);
-            write.put("commandNumber", number & 0xffff);
-            write.put("tnpApplicationVersion", tnpApplicationVersion & 0xff);
-            event("PPPP_Write", write);
+            long elapsedMicros = (System.nanoTime() - started) / 1_000L;
+            if (emitWriteEvent) {
+                JSONObject write = new JSONObject();
+                write.put("returnValue", result);
+                write.put("elapsedMicros", elapsedMicros);
+                write.put("channel", 0);
+                write.put("bufferLength", unit.length);
+                write.put("command", command);
+                write.put("commandNumber", number & 0xffff);
+                write.put("tnpApplicationVersion", tnpApplicationVersion & 0xff);
+                event("PPPP_Write", write);
+            }
             Arrays.fill(body, (byte) 0);
             Arrays.fill(unit, (byte) 0);
             if (result < 0) throw new IllegalStateException("PPPP write failed");
