@@ -18,7 +18,10 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javax.crypto.Mac;
@@ -38,12 +41,19 @@ public final class OracleActivity extends Activity {
         private static final int HOST_PORT = 27183;
         private static final int SET_RESOLUTION = 4881;
         private static final int START_REALTIME = 9029;
+        private static final int GET_DEVICE_INFO = 768;
+        private static final int SET_RESOLUTION_RESPONSE = 4882;
         private static final int STOP_LIVE = 767;
         private static final char[] NONCE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
 
         private final SecureRandom random = new SecureRandom();
         private final AtomicBoolean reading = new AtomicBoolean(false);
         private final AtomicLong firstIFrameAt = new AtomicLong(0);
+        private final AtomicLong startupStartedAt = new AtomicLong(0);
+        private final AtomicLong firstControlResponseAt = new AtomicLong(0);
+        private final AtomicInteger firstControlCommand = new AtomicInteger(-1);
+        private final AtomicBoolean received4882 = new AtomicBoolean(false);
+        private final CountDownLatch controlReaderReady = new CountDownLatch(1);
         private DataInputStream input;
         private DataOutputStream output;
         private int handle = -1;
@@ -58,6 +68,9 @@ public final class OracleActivity extends Activity {
         @Override
         public void run() {
             boolean initialized = false;
+            Thread channel0 = null;
+            Thread channel2 = null;
+            Thread channel3 = null;
             try (Socket socket = connectHost()) {
                 input = new DataInputStream(socket.getInputStream());
                 output = new DataOutputStream(socket.getOutputStream());
@@ -123,51 +136,67 @@ public final class OracleActivity extends Activity {
                 event("PPPP_Check", checked);
                 if (checkResult != 0) throw new IllegalStateException("PPPP check failed");
 
+                /*
+                 * Phase 2C.3: reproduce the successful older-official startup
+                 * state machine. The critical experimental change is that the
+                 * first three IOCTRLs are written back-to-back; no blocking
+                 * channel-0 read is allowed between them.
+                 */
+                reading.set(true);
+                channel0 = new Thread(this::readControlResponses, "yi-channel-0");
+                channel2 = new Thread(() -> readFrames((byte) 2), "yi-channel-2");
+                channel3 = new Thread(() -> readFrames((byte) 3), "yi-channel-3");
+                channel0.start();
+                channel2.start();
+                channel3.start();
+                if (!controlReaderReady.await(2, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Channel-0 reader did not become ready");
+                }
+
                 int resolutionUseCount = startUseCount - 1;
                 byte[] resolutionPayload = new byte[8];
                 putInt(resolutionPayload, 0, resolution);
                 putInt(resolutionPayload, 4, resolutionUseCount);
-                int resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
-                CommandResponse authentication = readCommandResponse();
-                if (authentication.version != tnpApplicationVersion) {
-                    tnpApplicationVersion = authentication.version;
-                    event("tnp_application_version_detected", new JSONObject().put("value", tnpApplicationVersion & 0xff));
-                    resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
-                    authentication = readCommandResponse();
-                }
-                JSONObject auth = new JSONObject();
-                auth.put("authResult", authentication.authResult);
-                auth.put("responseCommand", authentication.commandType);
-                auth.put("responseCommandNumber", authentication.commandNumber);
-                auth.put("requestCommandNumber", resolutionCommandNumber);
-                auth.put("tnpApplicationVersion", authentication.version & 0xff);
-                event("TNP_authentication", auth);
-                if (authentication.authResult != 0) throw new SecurityException("TNP authentication failed");
-
                 byte[] startPayload = new byte[] {(byte) startUseCount, (byte) resolution, 1, 0};
-                int startWrite = sendCommand(START_REALTIME, startPayload);
+                byte[] deviceInfoPayload = new byte[8];
+
+                startupStartedAt.set(System.nanoTime());
+                int resolutionCommandNumber = sendCommand(SET_RESOLUTION, resolutionPayload);
+                int startCommandNumber = sendCommand(START_REALTIME, startPayload);
                 liveStarted = true;
                 event("realtime_start", new JSONObject()
                         .put("command", START_REALTIME)
                         .put("channel", 0)
-                        .put("commandNumber", startWrite)
+                        .put("commandNumber", startCommandNumber)
                         .put("payloadLength", 4)
                         .put("useCount", startUseCount)
                         .put("resolution", resolution)
                         .put("commandVersion", 1)
                         .put("reserved", 0));
+                int deviceInfoCommandNumber = sendCommand(GET_DEVICE_INFO, deviceInfoPayload);
+                event("startup_burst_complete", new JSONObject()
+                        .put("firstCommand", SET_RESOLUTION)
+                        .put("firstCommandNumber", resolutionCommandNumber)
+                        .put("secondCommand", START_REALTIME)
+                        .put("secondCommandNumber", startCommandNumber)
+                        .put("thirdCommand", GET_DEVICE_INFO)
+                        .put("thirdCommandNumber", deviceInfoCommandNumber)
+                        .put("blockingReadBetweenCommands", false)
+                        .put("tnpApplicationVersion", tnpApplicationVersion & 0xff));
 
-                reading.set(true);
-                Thread channel2 = new Thread(() -> readFrames((byte) 2), "yi-channel-2");
-                Thread channel3 = new Thread(() -> readFrames((byte) 3), "yi-channel-3");
-                channel2.start();
-                channel3.start();
+                long observationDeadline = System.nanoTime() + captureSeconds * 1_000_000_000L;
+                while (System.nanoTime() < observationDeadline) Thread.sleep(50);
 
-                long waitDeadline = System.nanoTime() + 20_000_000_000L;
-                while (firstIFrameAt.get() == 0 && System.nanoTime() < waitDeadline) Thread.sleep(50);
-                if (firstIFrameAt.get() == 0) throw new IllegalStateException("No realtime I-frame observed");
-                long captureDeadline = firstIFrameAt.get() + captureSeconds * 1_000_000_000L;
-                while (System.nanoTime() < captureDeadline) Thread.sleep(50);
+                JSONObject outcome = new JSONObject()
+                        .put("received4882", received4882.get())
+                        .put("firstControlCommand", firstControlCommand.get())
+                        .put("firstIFrameObserved", firstIFrameAt.get() != 0);
+                long responseAt = firstControlResponseAt.get();
+                long startupAt = startupStartedAt.get();
+                if (responseAt != 0 && startupAt != 0) {
+                    outcome.put("firstControlResponseMillis", (responseAt - startupAt) / 1_000_000L);
+                }
+                event("phase2c3_observation", outcome);
 
                 byte[] stopPayload = new byte[8];
                 int stopCommandNumber = sendCommand(STOP_LIVE, stopPayload);
@@ -180,9 +209,13 @@ public final class OracleActivity extends Activity {
                 int closeResult = PPPP_APIs.PPPP_ForceClose(handle);
                 event("PPPP_ForceClose", new JSONObject().put("returnValue", closeResult).put("sessionHandle", handle));
                 handle = -1;
+                channel0.join(5000);
                 channel2.join(5000);
                 channel3.join(5000);
-                event("reader_shutdown", new JSONObject().put("channel2Stopped", !channel2.isAlive()).put("channel3Stopped", !channel3.isAlive()));
+                event("reader_shutdown", new JSONObject()
+                        .put("channel0Stopped", !channel0.isAlive())
+                        .put("channel2Stopped", !channel2.isAlive())
+                        .put("channel3Stopped", !channel3.isAlive()));
             } catch (Throwable failure) {
                 safeError(failure);
             } finally {
@@ -275,7 +308,48 @@ public final class OracleActivity extends Activity {
             if (unit.length < 48 || unit[1] != 3) throw new IllegalStateException("Invalid command response framing");
             int dataSize = getInt(unit, 4);
             if (dataSize + 8 != unit.length) throw new IllegalStateException("Invalid command response size");
-            return new CommandResponse(unit[0], getUnsignedShort(unit, 8), getUnsignedShort(unit, 10), getInt(unit, 16));
+            return new CommandResponse(
+                    unit[0],
+                    getUnsignedShort(unit, 8),
+                    getUnsignedShort(unit, 10),
+                    getUnsignedShort(unit, 14),
+                    getInt(unit, 16),
+                    unit.length);
+        }
+
+        private void readControlResponses() {
+            controlReaderReady.countDown();
+            while (reading.get()) {
+                try {
+                    CommandResponse response = readCommandResponse();
+                    long now = System.nanoTime();
+                    if (firstControlResponseAt.compareAndSet(0, now)) {
+                        firstControlCommand.compareAndSet(-1, response.commandType);
+                    }
+                    if (response.commandType == SET_RESOLUTION_RESPONSE) {
+                        received4882.set(true);
+                        event("TNP_authentication", new JSONObject()
+                                .put("authResult", response.authResult)
+                                .put("responseCommand", response.commandType)
+                                .put("responseCommandNumber", response.commandNumber)
+                                .put("tnpApplicationVersion", response.version & 0xff));
+                    }
+                    JSONObject control = new JSONObject()
+                            .put("command", response.commandType)
+                            .put("commandNumber", response.commandNumber)
+                            .put("payloadLength", response.payloadLength)
+                            .put("bufferLength", response.totalLength)
+                            .put("tnpApplicationVersion", response.version & 0xff);
+                    long startupAt = startupStartedAt.get();
+                    if (startupAt != 0) {
+                        control.put("sinceStartupMillis", (now - startupAt) / 1_000_000L);
+                    }
+                    event("TNP_control_response", control);
+                } catch (Throwable failure) {
+                    if (reading.get()) safeError(failure);
+                    return;
+                }
+            }
         }
 
         private byte[] readUnit(byte channel) throws Exception {
@@ -403,13 +477,17 @@ public final class OracleActivity extends Activity {
             final byte version;
             final int commandType;
             final int commandNumber;
+            final int payloadLength;
             final int authResult;
+            final int totalLength;
 
-            CommandResponse(byte version, int commandType, int commandNumber, int authResult) {
+            CommandResponse(byte version, int commandType, int commandNumber, int payloadLength, int authResult, int totalLength) {
                 this.version = version;
                 this.commandType = commandType;
                 this.commandNumber = commandNumber;
+                this.payloadLength = payloadLength;
                 this.authResult = authResult;
+                this.totalLength = totalLength;
             }
         }
     }
