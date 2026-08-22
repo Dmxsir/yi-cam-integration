@@ -18,11 +18,11 @@ STATE_DIR="$WORK/runtime"
 CACHE_FILE="$WORK/capabilities.json"
 SERVICE_PID=""
 PUBLISHER_PID=""
-FAULT_QEMU_PID=""
+FAULT_RELAY_PGID=""
 
 cleanup() {
-  if [[ -n "$FAULT_QEMU_PID" ]] && kill -0 "$FAULT_QEMU_PID" 2>/dev/null; then
-    kill -CONT "$FAULT_QEMU_PID" 2>/dev/null || true
+  if [[ -n "$FAULT_RELAY_PGID" ]]; then
+    kill -CONT -- "-$FAULT_RELAY_PGID" 2>/dev/null || true
   fi
   if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" 2>/dev/null; then
     kill -TERM "$SERVICE_PID" 2>/dev/null || true
@@ -137,15 +137,16 @@ raise SystemExit(0 if video and audio else 1)
 PY
 }
 
-find_qemu_descendant() {
-  local root_pid="$1"
-  "$PYTHON" - "$root_pid" <<'PY'
+find_fault_relay_pgid() {
+  local supervisor_pid="$1"
+  local stable_id="$2"
+  "$PYTHON" - "$supervisor_pid" "$stable_id" <<'PY'
 from pathlib import Path
 import os,re,sys
 
-root=int(sys.argv[1])
-children={}
-meta={}
+supervisor=int(sys.argv[1])
+stable_id=sys.argv[2]
+candidates=[]
 for entry in Path('/proc').iterdir():
     if not entry.name.isdigit():
         continue
@@ -153,36 +154,25 @@ for entry in Path('/proc').iterdir():
     try:
         status=(entry/'status').read_text(encoding='utf-8',errors='replace')
         match=re.search(r'^PPid:\s+(\d+)$',status,re.MULTILINE)
-        if not match:
+        if not match or int(match.group(1)) != supervisor:
             continue
-        ppid=int(match.group(1))
-        cmd=(entry/'cmdline').read_bytes().replace(b'\0',b' ').decode('utf-8','replace')
-        name=''
-        for line in status.splitlines():
-            if line.startswith('Name:'):
-                name=line.split(':',1)[1].strip()
-                break
-    except (OSError,ValueError):
+        argv=(entry/'cmdline').read_bytes().split(b'\0')
+        args=[item.decode('utf-8','replace') for item in argv if item]
+        command=' '.join(args)
+        if 'yi_native_av_relay_stable.py' not in command:
+            continue
+        if '--stable-id' not in args or stable_id not in args:
+            continue
+        pgid=os.getpgid(pid)
+        sid=os.getsid(pid)
+    except (OSError,ValueError,ProcessLookupError):
         continue
-    children.setdefault(ppid,[]).append(pid)
-    meta[pid]=(name,cmd)
+    if pgid == pid and sid == pid:
+        candidates.append(pid)
 
-seen=set()
-stack=list(children.get(root,[]))
-qemu=[]
-while stack:
-    pid=stack.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    name,cmd=meta.get(pid,('',''))
-    if 'qemu-aarch64' in name or 'qemu-aarch64' in cmd:
-        qemu.append(pid)
-    stack.extend(children.get(pid,[]))
-
-if len(qemu) != 1:
+if len(candidates) != 1:
     raise SystemExit(2)
-print(qemu[0])
+print(candidates[0])
 PY
 }
 
@@ -315,11 +305,11 @@ validate_rtsp "$FAULT_ID" "$WORK/fault-before.json" "$WORK/fault-before.err" || 
 validate_rtsp "$PEER_ID" "$WORK/peer-before.json" "$WORK/peer-before.err" || fail "peer camera RTSP did not validate before fault"
 echo "dual_rtsp_h264_aac=PASS"
 
-FAULT_QEMU_PID="$(find_qemu_descendant "$FAULT_PID_INITIAL")" || fail "could not identify exactly one qemu descendant for fault camera"
-[[ "$FAULT_QEMU_PID" =~ ^[0-9]+$ ]] || fail "invalid scoped qemu pid"
-kill -STOP "$FAULT_QEMU_PID" || fail "failed to freeze scoped fault-camera qemu"
-echo "fault_injection_scoped_qemu=PASS"
-echo "fault_qemu_pid=$FAULT_QEMU_PID"
+FAULT_RELAY_PGID="$(find_fault_relay_pgid "$FAULT_PID_INITIAL" "$FAULT_ID")" || fail "could not identify exactly one relay process group for fault camera"
+[[ "$FAULT_RELAY_PGID" =~ ^[0-9]+$ ]] || fail "invalid scoped relay process group"
+kill -STOP -- "-$FAULT_RELAY_PGID" || fail "failed to freeze scoped fault-camera relay process group"
+echo "fault_injection_scoped_relay_group=PASS"
+echo "fault_relay_pgid=$FAULT_RELAY_PGID"
 
 validate_rtsp "$PEER_ID" "$WORK/peer-during-fault.json" "$WORK/peer-during-fault.err" || fail "peer RTSP failed during selected-camera fault"
 echo "peer_rtsp_during_fault=PASS"
@@ -386,11 +376,11 @@ echo "fault_runtime_generation_recovered=$FAULT_GEN_RECOVERED"
 echo "peer_runtime_unchanged=PASS"
 echo "publisher_survived_fault=PASS"
 
-if kill -0 "$FAULT_QEMU_PID" 2>/dev/null; then
-  kill -CONT "$FAULT_QEMU_PID" 2>/dev/null || true
-  fail "original faulted qemu remained alive after camera recovery"
+if kill -0 -- "-$FAULT_RELAY_PGID" 2>/dev/null; then
+  kill -CONT -- "-$FAULT_RELAY_PGID" 2>/dev/null || true
+  fail "original faulted relay process group remained alive after camera recovery"
 fi
-FAULT_QEMU_PID=""
+FAULT_RELAY_PGID=""
 echo "faulted_runtime_descendant_cleanup=PASS"
 
 validate_rtsp "$FAULT_ID" "$WORK/fault-after.json" "$WORK/fault-after.err" || fail "fault camera RTSP did not recover"
