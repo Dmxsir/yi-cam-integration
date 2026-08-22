@@ -74,10 +74,6 @@ service_status_tail() {
 api_url="http://127.0.0.1:${API_PORT}/api/streams?src=${STREAM}"
 rtsp_url="rtsp://127.0.0.1:${RTSP_PORT}/${STREAM}"
 
-source_json() {
-    curl -fsS --max-time 2 "$api_url"
-}
-
 native_state() {
     local snapshot="$1"
     "$PYTHON" - "$snapshot" <<'PY'
@@ -229,8 +225,8 @@ preflight() {
 
     local tmp
     tmp="$(mktemp)"
-    trap 'rm -f "$tmp"' RETURN
     write_candidate_config "$tmp"
+    rm -f "$tmp"
     echo "candidate_config_render=PASS"
     echo "rollback_strategy=atomic_config_backup+service_restart"
     echo "PHASE3M_PREFLIGHT=PASS"
@@ -315,7 +311,7 @@ EOF
     echo "native_validation=PASS"
     echo "phone_runtime_required=false"
     echo "adb_runtime_required=false"
-    echo "production_stream=H264_1920x1080+AACLС_16000_MONO"
+    echo "production_stream=H264_1920x1080+AACLC_16000_MONO"
     echo "rollback_dir=${backup}"
     echo "PHASE3M_PRODUCTION_CUTOVER=PASS"
 }
