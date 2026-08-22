@@ -38,7 +38,7 @@ Home Assistant App packaging requirements are documented in [`docs/home-assistan
 - Two simultaneous native PPPP/TNP sessions proven (`warehouse` + `pool`).
 - Per-camera session isolation proven.
 - Media-stall watchdog implemented.
-- Fault injection with frozen pool QEMU proved automatic recovery without restarting go2rtc or the warehouse camera.
+- Fault injection proved automatic recovery without restarting go2rtc or the unaffected camera.
 
 ## Phase 6 — Add-on backend foundation — ACTIVE
 
@@ -89,39 +89,23 @@ Exit criteria: PASS.
 
 #### Phase 6C.4 — Live reprobe + cache refresh — COMPLETE
 
-Implemented:
-
-- `POST /api/v1/cameras/{stable_id}/reprobe` performs a real bounded live capability proof.
-- Reprobe uses the same continuous MPEG-TS stdout path as the production runtime.
-- Running camera is isolated before reprobe and restored afterward.
-- Capability cache is updated atomically only after observed H264 + AAC success.
+- Live bounded reprobe uses the production continuous MPEG-TS path.
+- Running camera is isolated and restored around reprobe.
+- Capability cache updates atomically only after observed H264 + AAC success.
 - Failed probes do not overwrite previous proven capability data.
-- Probe process groups are bounded and cleaned on timeout/Add-on shutdown.
-- Reprobe diagnostics remain secret-safe.
-
-Live PTZ proof (2026-08-23):
-
-- Initial runtime reached native media.
-- HTTP reprobe returned success on the first attempt.
-- Capability cache source updated to `addon_api_reprobe`.
-- Observed media remained H264 1920x1080 + AAC 16 kHz mono.
-- Independent isolated-cache readback passed.
-- Runtime resumed with a new lifecycle PID and reached native media again.
-- Stop, service shutdown and probe descendant cleanup all passed.
+- Probe descendants are bounded and cleaned on timeout/App shutdown.
 - `PHASE6C_REPROBE_SMOKE=PASS`.
 
-Exit criteria: PASS.
-
-#### Phase 6C.5 — Add-on-owned RTSP publication — ACTIVE
+#### Phase 6C.5 — Add-on-owned RTSP publication — COMPLETE
 
 Design locked:
 
 - Add-on service owns one shared managed go2rtc publisher process.
-- go2rtc is a media publisher only; it does **not** own PPPP/TNP runtime lifecycle.
-- Add-on generates go2rtc configuration automatically from discovered `stable_id` values.
-- Each camera gets an empty go2rtc destination stream derived only from immutable `stable_id`.
-- Lifecycle-managed MPEG-TS is pushed into go2rtc using its incoming MPEG-TS HTTP endpoint.
-- Friendly camera names are metadata only and never form part of stable RTSP URLs.
+- go2rtc publishes media only; PPPP/TNP lifecycle remains owned by the Add-on lifecycle manager.
+- go2rtc configuration is generated automatically from immutable `stable_id` values.
+- Each camera receives a stable destination stream `yi_<stable-id-prefix>`.
+- Lifecycle-managed MPEG-TS is pushed through go2rtc incoming MPEG-TS HTTP ingest.
+- Friendly names are metadata only and do not affect media identity.
 
 Target endpoint:
 
@@ -131,45 +115,68 @@ rtsp://<addon-host>:8554/yi_<stable-id-prefix>
 
 ##### Phase 6C.5A — isolated managed publisher — COMPLETE
 
-Live PTZ proof (2026-08-23) on isolated development ports:
+Live PTZ proof (2026-08-23):
 
 - Managed go2rtc started with all 7 discovered destination streams.
-- Production go2rtc ports `1984/8554` were untouched.
-- Lifecycle MPEG-TS ingest attached successfully.
-- go2rtc registered a media-ready MPEG-TS producer.
+- Production ports `1984/8554` were untouched.
+- MPEG-TS ingest registered a media-ready producer.
 - RTSP validated H264 1920x1080 + AAC 16 kHz mono.
 - Camera restart changed only the camera runtime PID (`10651` → `10737`).
-- Shared go2rtc survived the camera restart unchanged.
-- MPEG-TS producer re-registered media-ready and RTSP recovered with H264 + AAC.
-- Camera stop, service shutdown and managed publisher cleanup passed.
+- Shared go2rtc survived unchanged.
+- Producer re-registered media-ready and RTSP recovered.
+- Managed publisher cleanup passed.
 - `PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS`.
 
-A go2rtc probe-timeout edge case was fixed by prebuffering the first MPEG-TS chunk before opening incoming HTTP ingest, and readiness now distinguishes a registered producer from a producer with actual detected media.
+The go2rtc startup probe edge case was fixed by prebuffering the first MPEG-TS chunk before opening incoming HTTP ingest and by distinguishing producer registration from actual detected media readiness.
 
-Exit criteria: PASS.
+##### Phase 6C.5B — two-camera + fault isolation — COMPLETE
 
-##### Phase 6C.5B — two-camera + fault isolation — ACTIVE
+Live PTZ + pool proof (2026-08-23) on isolated ports `18103/11985/18555`:
+
+- Two different cameras started through backend HTTP concurrently.
+- Both publications became registered and media-ready.
+- Both RTSP endpoints validated H264 + AAC concurrently.
+- Fault injection was scoped to the PTZ relay process group only.
+- Pool RTSP remained valid during the PTZ fault.
+- PTZ lifecycle PID changed `11272` → `11588` and generation changed `1` → `2`.
+- Pool runtime PID/generation remained unchanged.
+- Shared go2rtc PID remained unchanged.
+- The original faulted runtime descendants were cleaned.
+- Both RTSP endpoints validated H264 + AAC again after recovery.
+- Dual runtime stop, graceful service shutdown and publisher cleanup passed.
+- `PHASE6C_MEDIA_ISOLATION_SMOKE=PASS`.
+
+Exit criteria: PASS. Phase 6C.5 is complete.
+
+#### Phase 6C.6 — Persistence/startup policy — ACTIVE
+
+Policy locked:
+
+- Runtime intent is explicit and durable: `start`/`restart` persist `desired_running=true`; `stop` removes that intent.
+- Newly discovered cameras do not auto-start merely because they exist.
+- After backend/App restart, only cameras with persisted running intent are restored.
+- Temporary reprobe isolation does not alter persisted runtime intent.
+- A temporary YI cloud failure at boot does not erase intent or crash the service; initial discovery is retried and pending intent is reconciled after recovery.
+
+Implementation in progress:
+
+- `yi_runtime_policy.py` stores only secret-safe `stable_id` running intent using atomic mode-0600 JSON.
+- `yi_persistent_backend.py` adds policy/reconcile behavior without changing the proven media backend.
+- `yi_addon_service.py --data-dir <path>` places capability cache, runtime policy, runtime state and managed publisher state under one persistent root; the future App will use `/data`.
+- Health exposes secret-safe persistence/reconcile diagnostics.
+- Deterministic tests cover policy round-trip, permissions, pending unavailable cameras and cloud-discovery failure preserving pending intent.
+- `run_phase6c_persistence_smoke.sh` validates live persistence across three backend launches on isolated ports.
 
 Exit gate:
 
-- Two Add-on-managed RTSP streams validate H264 + AAC concurrently.
-- Fault injection targets only a QEMU descendant belonging to the selected test camera runtime.
-- The selected camera is recreated by the existing media-stall supervisor/lifecycle manager.
-- Only that camera generation/PID changes.
-- Second camera PID/generation remains unchanged and its RTSP stays valid during the fault.
-- Shared go2rtc PID remains unchanged.
-- Both RTSP endpoints validate H264 + AAC after recovery.
-- Test runs on isolated backend/go2rtc ports and does not modify production configuration.
+- Two running camera intents survive backend restart and both streams return automatically.
+- Capability cache lives under the persistent data root.
+- Explicitly stopping one camera persists; a later restart restores only the still-enabled camera.
+- Runtime policy/capability files are secret-safe and mode 0600.
+- Cloud-discovery failure keeps desired state pending for retry.
+- Service/publisher/runtime cleanup remains correct.
 
-Only after 6C.5B passes is Phase 6C.5 complete.
-
-#### Phase 6C.6 — Persistence/startup policy — PLANNED
-
-- Persist non-secret runtime preferences and capability cache under Add-on `/data`.
-- Restore intended camera runtime state after backend restart.
-- Safe boot behavior during temporary YI cloud outage.
-
-Phase 6C closes only after 6C.1–6C.6 pass.
+Phase 6C closes only after 6C.6 passes.
 
 ### Phase 6D — Home Assistant App/Add-on packaging — PLANNED
 
