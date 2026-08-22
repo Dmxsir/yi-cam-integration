@@ -86,12 +86,26 @@ Implementation direction:
 
 - `yi_camera_runtime.py` — reusable Add-on backend/runtime material provider.
 - `yi_native_av_relay_stable.py` — development adapter that feeds a `stable_id` runtime into the already-proven native relay.
+- `tools/phase3_pppp_probe/run_phase6b_stable_probe.sh` — compact development probe wrapper around the reusable runtime path.
 - The initial safe probe profile reuses the proven TNP-v2 command sequence. Success is determined by observed H264/AAC output, not raw model number.
+
+Live generic-runtime evidence (2026-08-23):
+
+- `ptz`, raw model `40`, resolved only by `stable_id`.
+- PPPP initialized and connected successfully.
+- TNP-v2 startup commands `4881 -> 9029 -> 768` were accepted.
+- TNP authentication response command `4882` returned auth result `0`.
+- Native media readers started successfully.
+- Observed media: H264 1920x1080 and AAC-LC 16 kHz mono.
+- Relay completed with `PHASE3G_NATIVE_AV=PASS` and `rc=0`.
+- This proves the generic runtime path is not restricted to raw model `83`.
+- A raw model `89` attempt failed at `PPPP_Connect`; the same camera was also unavailable in the official YI app at the time, so that result is classified as camera/runtime reachability failure rather than profile incompatibility.
 
 Exit criteria:
 
 - Known model-83 cameras work through the generic path.
-- At least one additional raw model is tested without adding a model whitelist.
+- At least one additional raw model is tested without adding a model whitelist. **PASS: raw model 40.**
+- Capability/profile result caching is implemented before Phase 6B is closed.
 
 ### Phase 6C — Add-on service/API — PLANNED
 
