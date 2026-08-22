@@ -3,10 +3,17 @@
 
 The YI PPPP library imports ordinary libc symbols tagged with Android's `LIBC`
 version namespace. GNU glibc exports the same names under `GLIBC_*`, so the
-loader refuses them before symbol-name matching. For this controlled
-compatibility probe we make undefined imports unversioned (VER_NDX_GLOBAL) and
-set DT_VERNEEDNUM to zero. The version-need section bytes are left in place;
-the dynamic loader no longer consumes them.
+loader rejects the DSO before ordinary symbol-name matching can happen.
+
+For this controlled compatibility probe we do two things:
+
+1. Make every undefined import unversioned (VER_NDX_GLOBAL) in `.gnu.version`.
+2. Neutralize DT_VERNEED, DT_VERNEEDNUM, and DT_VERSYM in the dynamic table.
+
+The second step is important: merely setting DT_VERNEEDNUM to zero is not
+sufficient for glibc's loader. We replace those three dynamic tags with harmless
+DT_BIND_NOW entries instead of inserting DT_NULL, because DT_NULL would truncate
+the dynamic table and hide later entries such as DT_RELACOUNT.
 """
 
 from __future__ import annotations
@@ -14,17 +21,21 @@ from __future__ import annotations
 import struct
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 ELF_MAGIC = b"\x7fELF"
 ELFCLASS64 = 2
 ELFDATA2LSB = 1
 SHN_UNDEF = 0
 DT_NULL = 0
+DT_BIND_NOW = 24
+DT_VERSYM = 0x6FFFFFF0
+DT_VERNEED = 0x6FFFFFFE
 DT_VERNEEDNUM = 0x6FFFFFFF
 VER_NDX_GLOBAL = 1
 
 
-def die(message: str) -> "NoReturn":
+def die(message: str) -> NoReturn:
     raise SystemExit(f"ERROR: {message}")
 
 
@@ -75,7 +86,9 @@ def main() -> int:
         )
 
     shstr = sections[e_shstrndx]
-    shstr_blob = bytes(data[int(shstr["offset"]): int(shstr["offset"]) + int(shstr["size"])])
+    shstr_blob = bytes(
+        data[int(shstr["offset"]): int(shstr["offset"]) + int(shstr["size"])]
+    )
     by_name: dict[str, dict[str, int | str]] = {}
     for section in sections:
         name = c_string(shstr_blob, int(section["name_offset"]))
@@ -108,6 +121,7 @@ def main() -> int:
         raw_version = struct.unpack_from("<H", data, ver_off)[0]
         version_index = raw_version & 0x7FFF
         if version_index > VER_NDX_GLOBAL:
+            # Drop both the version index and the hidden bit for undefined imports.
             struct.pack_into("<H", data, ver_off, VER_NDX_GLOBAL)
             cleared += 1
 
@@ -115,22 +129,33 @@ def main() -> int:
     if dynamic_entsize < 16:
         die("unexpected .dynamic entry size")
 
-    verneednum_found = 0
+    target_tags = {DT_VERNEED, DT_VERNEEDNUM, DT_VERSYM}
+    found_tags: set[int] = set()
     dynamic_count = int(dynamic["size"]) // dynamic_entsize
+
     for index in range(dynamic_count):
         entry_off = int(dynamic["offset"]) + index * dynamic_entsize
-        tag, value = struct.unpack_from("<qQ", data, entry_off)
+        tag, _value = struct.unpack_from("<qQ", data, entry_off)
         if tag == DT_NULL:
             break
-        if tag == DT_VERNEEDNUM:
-            struct.pack_into("<Q", data, entry_off + 8, 0)
-            verneednum_found += 1
+        if tag in target_tags:
+            found_tags.add(tag)
+            # Keep the dynamic table structurally intact while making the loader
+            # ignore Android version metadata. Duplicate DT_BIND_NOW entries are
+            # harmless; their value is ignored.
+            struct.pack_into("<qQ", data, entry_off, DT_BIND_NOW, 0)
 
-    if not verneednum_found:
-        die("DT_VERNEEDNUM was not found")
+    missing = target_tags - found_tags
+    if missing:
+        missing_text = ", ".join(f"0x{tag:x}" for tag in sorted(missing))
+        die(f"expected dynamic version tag(s) not found: {missing_text}")
 
     path.write_bytes(data)
-    print(f"compat_version_patch=OK cleared_undefined_symbols={cleared} verneednum_zeroed={verneednum_found}")
+    print(
+        "compat_version_patch=OK "
+        f"cleared_undefined_symbols={cleared} "
+        f"version_tags_neutralized={len(found_tags)}"
+    )
     return 0
 
 
