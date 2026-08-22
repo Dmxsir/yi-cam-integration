@@ -3,7 +3,8 @@
 
 The service exposes only secret-safe backend/runtime state. Optional managed
 go2rtc publication keeps media publishing inside the App while PPPP/TNP session
-ownership remains in the per-camera lifecycle manager.
+ownership remains in the per-camera lifecycle manager. When --data-dir is set,
+non-secret capability/runtime intent is persisted there for App restarts.
 """
 
 from __future__ import annotations
@@ -26,11 +27,13 @@ from yi_addon_backend import YiAddonBackend
 from yi_capability_cache import YiCapabilityCache
 from yi_capability_probe_runtime import YiCapabilityProbe
 from yi_media_publisher import Go2RTCPublisherConfig, YiGo2RTCPublisher
+from yi_persistent_backend import YiPersistentAddonBackend
 from yi_runtime_lifecycle import (
     YiRuntimeLifecycleManager,
     build_default_config,
     default_runtime_state_dir,
 )
+from yi_runtime_policy import YiRuntimePolicyStore
 
 CAMERA_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})$")
 STATUS_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/status$")
@@ -183,6 +186,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(os.getenv("YI_ADDON_PORT", "8099")))
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--no-initial-discovery", action="store_true")
+    parser.add_argument("--discovery-retry-interval", type=float, default=30.0)
+    parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--disable-lifecycle", action="store_true")
     parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--worker-dir", type=Path)
@@ -214,16 +219,33 @@ def main() -> int:
             raise SystemExit(f"{label} must be between 1 and 65535")
     if args.probe_duration <= 0:
         raise SystemExit("--probe-duration must be greater than zero")
+    if args.discovery_retry_interval < 0:
+        raise SystemExit("--discovery-retry-interval must not be negative")
 
     token = os.getenv("YI_ADDON_API_TOKEN") or None
     if not _is_loopback(args.bind) and token is None:
         raise SystemExit("non-loopback bind requires YI_ADDON_API_TOKEN")
 
+    data_dir = args.data_dir.expanduser().resolve() if args.data_dir is not None else None
+    if data_dir is not None:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(data_dir, 0o700)
+        except OSError:
+            pass
+
+    selected_runtime_state = args.runtime_state_dir
+    if selected_runtime_state is None and data_dir is not None:
+        selected_runtime_state = data_dir / "runtime"
+
     media_publisher: YiGo2RTCPublisher | None = None
     if args.go2rtc_bin is not None:
-        publisher_state = args.go2rtc_state_dir or (
-            (args.runtime_state_dir or default_runtime_state_dir()) / "publisher"
-        )
+        if args.go2rtc_state_dir is not None:
+            publisher_state = args.go2rtc_state_dir
+        elif data_dir is not None:
+            publisher_state = data_dir / "publisher"
+        else:
+            publisher_state = (selected_runtime_state or default_runtime_state_dir()) / "publisher"
         media_publisher = YiGo2RTCPublisher(
             Go2RTCPublisherConfig(
                 binary=args.go2rtc_bin.expanduser().resolve(),
@@ -235,9 +257,9 @@ def main() -> int:
             )
         )
 
+    capability_cache = YiCapabilityCache(data_dir / "capabilities.json" if data_dir is not None else None)
     lifecycle: YiRuntimeLifecycleManager | None = None
     capability_probe: YiCapabilityProbe | None = None
-    capability_cache = YiCapabilityCache()
     if not args.disable_lifecycle:
         if args.env_file is None:
             raise SystemExit("--env-file is required unless --disable-lifecycle is used")
@@ -246,7 +268,7 @@ def main() -> int:
             root=Path(__file__).resolve().parent,
             runtime_root=args.runtime_root,
             worker_dir=args.worker_dir,
-            state_dir=args.runtime_state_dir,
+            state_dir=selected_runtime_state,
             startup_timeout=args.startup_timeout,
             stall_timeout=args.stall_timeout,
             terminate_grace=args.terminate_grace,
@@ -262,20 +284,31 @@ def main() -> int:
             duration_seconds=args.probe_duration,
         )
 
-    backend = YiAddonBackend(
-        timeout=args.timeout,
-        capability_cache=capability_cache,
-        lifecycle=lifecycle,
-        capability_probe=capability_probe,
-        media_publisher=media_publisher,
-    )
+    backend_kwargs = {
+        "timeout": args.timeout,
+        "capability_cache": capability_cache,
+        "lifecycle": lifecycle,
+        "capability_probe": capability_probe,
+        "media_publisher": media_publisher,
+    }
+    if data_dir is not None:
+        backend: YiAddonBackend = YiPersistentAddonBackend(
+            runtime_policy=YiRuntimePolicyStore(data_dir / "runtime-policy.json"),
+            **backend_kwargs,
+        )
+    else:
+        backend = YiAddonBackend(**backend_kwargs)
+
+    initial_discovery_ok = args.no_initial_discovery
     if not args.no_initial_discovery:
         try:
             backend.discover(fetch_tnp=True)
         except Exception:
-            # Keep the service alive so health/discover can recover from cloud
-            # or publisher startup problems without crashing the App.
-            pass
+            # Keep the service alive. Persistent runtime intent remains pending
+            # and the retry loop below will reconcile it after cloud recovery.
+            initial_discovery_ok = False
+        else:
+            initial_discovery_ok = True
 
     server = YiAddonHTTPServer((args.bind, args.port), backend, token)
     stopping = threading.Event()
@@ -289,6 +322,25 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    if (
+        not args.no_initial_discovery
+        and not initial_discovery_ok
+        and args.discovery_retry_interval > 0
+    ):
+        def retry_initial_discovery() -> None:
+            while not stopping.wait(args.discovery_retry_interval):
+                try:
+                    backend.discover(fetch_tnp=True)
+                except Exception:
+                    continue
+                return
+
+        threading.Thread(
+            target=retry_initial_discovery,
+            name="yi-initial-discovery-retry",
+            daemon=True,
+        ).start()
+
     print(
         json.dumps(
             {
@@ -300,6 +352,11 @@ def main() -> int:
                 "runtime_lifecycle_ready": lifecycle is not None,
                 "reprobe_ready": capability_probe is not None,
                 "media_publisher_enabled": media_publisher is not None,
+                "persistence_enabled": data_dir is not None,
+                "initial_discovery_ok": initial_discovery_ok,
+                "discovery_retry_enabled": bool(
+                    not args.no_initial_discovery and args.discovery_retry_interval > 0
+                ),
                 "secrets_exposed": False,
             },
             separators=(",", ":"),
@@ -310,6 +367,7 @@ def main() -> int:
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
+        stopping.set()
         backend.shutdown()
         server.server_close()
     return 0
