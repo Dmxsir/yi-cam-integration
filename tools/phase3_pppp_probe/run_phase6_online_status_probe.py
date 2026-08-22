@@ -86,7 +86,8 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
-    parser.add_argument("--library", type=Path, required=True)
+    parser.add_argument("--library", type=Path, required=True, help="host path used only for preflight existence checking")
+    parser.add_argument("--guest-library", default="/data/local/tmp/yi-online-status/libPPPP_API.so")
     parser.add_argument("--qemu", default="qemu-aarch64")
     parser.add_argument("--camera-timeout", type=float, default=12.0)
     args = parser.parse_args()
@@ -101,6 +102,8 @@ def main() -> int:
             raise SystemExit(f"{label} missing: {path}")
     if args.camera_timeout <= 0:
         raise SystemExit("--camera-timeout must be greater than zero")
+    if not args.guest_library.startswith("/"):
+        raise SystemExit("--guest-library must be an absolute Bionic guest path")
 
     oracle.load_env_file(args.env_file)
     manager = YiCameraManager(timeout=10.0)
@@ -159,7 +162,7 @@ def main() -> int:
                     "-E",
                     "LD_LIBRARY_PATH=/data/local/tmp/yi-online-status:/system/lib64",
                     str(args.worker),
-                    str(args.library),
+                    args.guest_library,
                 ]
                 proc = subprocess.run(
                     command,
