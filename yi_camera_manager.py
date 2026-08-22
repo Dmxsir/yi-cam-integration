@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Generic YI account camera discovery and material manager.
 
-Phase 6 removes the Phase 3 single-camera assumptions from discovery.  It logs
+Phase 6 removes the Phase 3 single-camera assumptions from discovery. It logs
 in once, enumerates every camera returned by /v4/devices/list, assigns a stable
 secret-safe identifier derived from the cloud UID, and can validate TNP
 connection material for every eligible camera without opening a PPPP session.
 
 No camera password, UID, DID, InitString, license, token or token secret is
-printed by this module.  Runtime streaming/probing is intentionally a separate
-step so discovery cannot disturb the currently running production relays.
+printed by this module. Runtime streaming/probing is intentionally a separate
+step so discovery cannot disturb currently running production relays.
 """
 
 from __future__ import annotations
@@ -17,13 +17,13 @@ import argparse
 import hashlib
 import json
 import os
-import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import yi_cloud_probe as cloud
 import yi_tnp_oracle as oracle
+from yi_stream_identity import media_stream_name
 
 
 def _required_env(name: str) -> str:
@@ -36,12 +36,6 @@ def _required_env(name: str) -> str:
 def _stable_id(uid: str) -> str:
     """Return a deterministic identifier without exposing the YI cloud UID."""
     return hashlib.sha256(uid.encode("utf-8")).hexdigest()[:20]
-
-
-def _slug(value: str) -> str:
-    folded = value.casefold()
-    folded = re.sub(r"[^a-z0-9]+", "_", folded).strip("_")
-    return folded[:28]
 
 
 @dataclass(frozen=True)
@@ -142,7 +136,6 @@ class YiCameraManager:
         for item in cameras:
             uid = item.get("uid")
             if not isinstance(uid, str) or not uid:
-                # A camera without a UID cannot be addressed by the TNP endpoint.
                 continue
             stable = _stable_id(uid)
             if stable in seen:
@@ -181,8 +174,6 @@ class YiCameraManager:
         if not isinstance(uid, str) or not uid:
             return "uid_missing", False
         if encrypted_password == "":
-            # The APK has a fallback credential path.  We record it but do not
-            # use it for native streaming until it has been explicitly proven.
             return "apk_default_unverified", False
         if not isinstance(encrypted_password, str) or not encrypted_password:
             return "camera_password_missing", False
@@ -237,11 +228,9 @@ class YiCameraManager:
                     tnp_status = "device_info_failed"
 
         probe_candidate = p2p_type == 2 and credential_usable and (tnp_ready if fetch_tnp else True)
-        label = _slug(name)
-        stream_id = f"yi_{label}_{stable_id[:8]}" if label else f"yi_{stable_id[:12]}"
         return CameraDevice(
             stable_id=stable_id,
-            stream_id=stream_id,
+            stream_id=media_stream_name(stable_id),
             name=name,
             raw_model=raw_model,
             normalized_model=normalized,
