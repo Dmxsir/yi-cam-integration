@@ -2,10 +2,11 @@
 
 This module is deliberately separate from :mod:`yi_model_registry`: the latter
 contains APK-derived ``feature_config`` mappings, while this file records
-external observations that are useful when a newer cloud raw model is absent
-from the analyzed APK.
+external observations that are useful for marketing-name and firmware-family
+cross-checks, especially when a newer cloud raw model is absent from the
+analyzed APK.
 
-Only exact raw-model + cloud-version matches are resolved here.  This prevents a
+Only exact raw-model + cloud-version matches are recorded here. This prevents a
 community observation for one firmware line from being silently generalized to
 all devices that happen to share a raw model.
 """
@@ -38,6 +39,47 @@ _EXTERNAL: dict[tuple[str, str], ExternalModelEvidence] = {
         sources=(
             "roleoroleo/yi-hack-Allwinner-v2#1102",
             "roleoroleo/yi-hack-Allwinner-v2#1115",
+        ),
+    ),
+    (
+        "83",
+        "12.0.35.8_202607170948",
+    ): ExternalModelEvidence(
+        raw_model="83",
+        cloud_version="12.0.35.8_202607170948",
+        model="y291ga",
+        marketing_name="YI 1080p Home",
+        evidence="external_firmware_family_crosscheck",
+        sources=(
+            "roleoroleo/yi-hack-Allwinner-v2 README: YI 1080p Home / 12.0.35* / y291ga",
+        ),
+    ),
+    (
+        "51",
+        "9.0.19.12_202102241808",
+    ): ExternalModelEvidence(
+        raw_model="51",
+        cloud_version="9.0.19.12_202102241808",
+        model="y21ga",
+        marketing_name="YI 1080p Home / YI Home 1080 AI+",
+        evidence="external_exact_firmware_crosscheck",
+        sources=(
+            "roleoroleo/yi-hack-Allwinner-v2#855",
+            "YI/Kami community firmware report for YI Home 1080 AI+",
+        ),
+    ),
+    (
+        "40",
+        "8.1.0.0A_202001211401",
+    ): ExternalModelEvidence(
+        raw_model="40",
+        cloud_version="8.1.0.0A_202001211401",
+        model="y30ga",
+        marketing_name="YI Dome X / YYS.3017 family",
+        evidence="external_exact_firmware_marketing_crosscheck",
+        sources=(
+            "roleoroleo/yi-hack-Allwinner-v2#1093",
+            "YI/Kami community Dome X firmware report",
         ),
     ),
 }
