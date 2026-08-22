@@ -60,11 +60,11 @@ done
 
 chmod +x "$TARGET_DIR/android_pppp_audio_probe"
 
-echo "=== PHASE 3E3: PHONELESS BIONIC AUDIO CHANNEL PROBE ==="
+echo "=== PHASE 3E3: PHONELESS BIONIC AUDIO CHANNEL + CODEC PROBE ==="
 echo "The proven PPPP/TNP startup is reused unchanged for the exact warehouse camera."
 echo "After successful 4882 authentication, one complete TNP unit is consumed from channel 1."
-echo "Only outer TNP audio metadata is printed; audio bytes are discarded in this smoke phase."
-echo "Codec classification is intentionally deferred until the channel-1 transport is proven."
+echo "Only the outer header and 24-byte media-header metadata are inspected; audio payload bytes are discarded."
+echo "Codec IDs are classified against constants extracted from the YI APK AVFrame class."
 echo "No ADB or USB phone is used."
 echo
 
