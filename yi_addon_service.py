@@ -143,7 +143,7 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/discover":
             try:
                 result = self.server.backend.discover(fetch_tnp=True)
-            except BaseException:
+            except Exception:
                 self._error(HTTPStatus.BAD_GATEWAY, "discovery_failed", "YI camera discovery failed.")
             else:
                 self._json(HTTPStatus.OK, result)
@@ -189,7 +189,7 @@ def main() -> int:
     if not args.no_initial_discovery:
         try:
             backend.discover(fetch_tnp=True)
-        except BaseException:
+        except Exception:
             # The service remains available so /health can report state and a
             # later POST /discover can recover from a temporary cloud outage.
             pass
