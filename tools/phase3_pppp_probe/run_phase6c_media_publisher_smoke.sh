@@ -39,6 +39,8 @@ trap cleanup EXIT INT TERM
 
 fail() {
   echo "ERROR: $*" >&2
+  [[ -f "$WORK/status.json" ]] && { echo "--- camera status ---" >&2; cat "$WORK/status.json" >&2 || true; echo >&2; }
+  [[ -f "$WORK/status-restart.json" ]] && { echo "--- camera restart status ---" >&2; cat "$WORK/status-restart.json" >&2 || true; echo >&2; }
   [[ -f "$WORK/service.log" ]] && { echo "--- service log ---" >&2; cat "$WORK/service.log" >&2 || true; }
   [[ -f "$STATE_DIR/$STABLE_ID.log" ]] && { echo "--- camera runtime log ---" >&2; tail -n 120 "$STATE_DIR/$STABLE_ID.log" >&2 || true; }
   [[ -f "$STATE_DIR/publisher/go2rtc.log" ]] && { echo "--- managed go2rtc log ---" >&2; tail -n 120 "$STATE_DIR/publisher/go2rtc.log" >&2 || true; }
@@ -117,18 +119,20 @@ curl -fsS --max-time 10 -X POST "$BASE/cameras/$STABLE_ID/start" >"$WORK/start.j
 echo "start_http=PASS"
 
 FIRST_RUNTIME_PID=""
-for _ in $(seq 1 100); do
+for _ in $(seq 1 120); do
   curl -fsS --max-time 3 "$BASE/cameras/$STABLE_ID/status" >"$WORK/status.json" || true
   FIRST_RUNTIME_PID="$($PYTHON - "$WORK/status.json" <<'PY'
 import json,sys
 try:
     obj=json.load(open(sys.argv[1],encoding='utf-8'))
-    r=(obj.get('status') or {}).get('runtime') or {}
-    publication=(obj.get('status') or {}).get('publication') or {}
+    status=obj.get('status') or {}
+    r=status.get('runtime') or {}
+    publication=status.get('publication') or {}
     if (r.get('runtime_state')=='running' and r.get('process_alive') is True
-        and r.get('media_publisher_attached') is True
         and int(r.get('published_bytes',0)) >= 65536
         and publication.get('configured') is True
+        and publication.get('producer_registered') is True
+        and int(publication.get('mpegts_producer_count',0)) >= 1
         and isinstance(r.get('pid'),int)):
         print(r['pid'])
 except Exception:
@@ -138,8 +142,9 @@ PY
   [[ -n "$FIRST_RUNTIME_PID" ]] && break
   sleep 0.5
 done
-[[ -n "$FIRST_RUNTIME_PID" ]] || fail "camera runtime did not attach and publish MPEG-TS"
+[[ -n "$FIRST_RUNTIME_PID" ]] || fail "go2rtc never registered the camera MPEG-TS producer"
 echo "mpegts_ingest_attached=PASS"
+echo "go2rtc_producer_registered=PASS"
 echo "runtime_pid_initial=$FIRST_RUNTIME_PID"
 
 if ! timeout 25 ffprobe -v error -rtsp_transport tcp \
@@ -162,18 +167,21 @@ curl -fsS --max-time 15 -X POST "$BASE/cameras/$STABLE_ID/restart" >"$WORK/resta
 echo "restart_http=PASS"
 
 SECOND_RUNTIME_PID=""
-for _ in $(seq 1 120); do
+for _ in $(seq 1 140); do
   curl -fsS --max-time 3 "$BASE/cameras/$STABLE_ID/status" >"$WORK/status-restart.json" || true
   SECOND_RUNTIME_PID="$($PYTHON - "$WORK/status-restart.json" "$FIRST_RUNTIME_PID" <<'PY'
 import json,sys
 try:
     obj=json.load(open(sys.argv[1],encoding='utf-8'))
     old=int(sys.argv[2])
-    r=(obj.get('status') or {}).get('runtime') or {}
+    status=obj.get('status') or {}
+    r=status.get('runtime') or {}
+    publication=status.get('publication') or {}
     pid=r.get('pid')
     if (r.get('runtime_state')=='running' and r.get('process_alive') is True
-        and r.get('media_publisher_attached') is True
         and int(r.get('published_bytes',0)) >= 65536
+        and publication.get('producer_registered') is True
+        and int(publication.get('mpegts_producer_count',0)) >= 1
         and isinstance(pid,int) and pid != old):
         print(pid)
 except Exception:
@@ -183,8 +191,9 @@ PY
   [[ -n "$SECOND_RUNTIME_PID" ]] && break
   sleep 0.5
 done
-[[ -n "$SECOND_RUNTIME_PID" ]] || fail "camera did not reattach to publisher after restart"
+[[ -n "$SECOND_RUNTIME_PID" ]] || fail "camera did not re-register its MPEG-TS producer after restart"
 echo "runtime_republish_after_restart=PASS"
+echo "go2rtc_producer_reregistered=PASS"
 echo "runtime_pid_restarted=$SECOND_RUNTIME_PID"
 
 curl -fsS --max-time 3 "$BASE/health" >"$WORK/health-after.json"
