@@ -11,6 +11,10 @@ Model resolution keeps evidence sources separate:
 - Supplemental external evidence is used only for an exact raw-model + cloud
   version match. It can either resolve a missing APK mapping or add a marketing
   name / firmware-family cross-check to an already-known mapping.
+
+The cloud ``online`` field is deliberately reported as ``cloud_online_reported``.
+It may be stale and must not be treated as an authoritative reachability signal.
+A later native PPPP Connect/Check result is the authoritative runtime signal.
 """
 
 from __future__ import annotations
@@ -95,6 +99,7 @@ def main() -> int:
     print(f"camera_count={len(cameras)}")
     print("secret_fields_logged=false")
     print("firmware_note=cloud_inter_version_is_version_like_only_not_authoritative_firmware")
+    print("online_note=cloud_online_reported_may_be_stale_use_native_pppp_reachability_for_runtime_status")
     print("resolution_policy=apk_registry_plus_exact_raw_model_and_cloud_version_external_crosscheck")
 
     for index, camera in enumerate(cameras):
@@ -144,7 +149,7 @@ def main() -> int:
         print(f"camera[{index}].supplemental_evidence={supplemental_evidence}")
         print(f"camera[{index}].evidence_sources={evidence_sources}")
         print(f"camera[{index}].p2p_type={camera.get('type')}")
-        print(f"camera[{index}].online={camera.get('online') is True}")
+        print(f"camera[{index}].cloud_online_reported={camera.get('online') is True}")
 
     # Drop references to account session secrets before normal exit.
     token = token_secret = ""
