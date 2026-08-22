@@ -4,8 +4,9 @@
 The exact warehouse camera is connected through the proven Bionic PPPP/TNP
 path. The normal 4881 -> 9029 -> 768 startup burst is preserved, 4882 auth is
 verified in the native child, and one complete TNP unit is consumed from PPPP
-channel 1. Only outer TNP audio metadata is printed; compressed audio bytes are
-consumed and discarded in this smoke phase.
+channel 1. The native child now inspects only the 24-byte TNP media header and
+classifies its codec against APK-derived AVFrame audio codec constants. Audio
+payload bytes are consumed and discarded and are never logged.
 """
 
 from __future__ import annotations
@@ -77,7 +78,8 @@ def main() -> int:
         print("audio_channel=1")
         print("audio_start_command=768")
         print("expected_tnp_io_type=2")
-        print("audio_codec=NOT_CLASSIFIED_YET")
+        print("audio_codec_source=APK_AVFrame_constants_plus_live_TNP_media_header")
+        print("known_audio_codec_ids=138:AAC,139:ADPCM,140:PCM,141:SPEEX,142:MP3,143:G726")
         print("media_bytes_logged=false")
         print("secret_transport=stdin_only")
         print("phone_required=false")
