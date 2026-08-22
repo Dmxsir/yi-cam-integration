@@ -2,8 +2,8 @@
 """Versioned HTTP service for the future YI Home Add-on.
 
 The service exposes only secret-safe backend/runtime state. When an env file is
-provided, Phase 6C.2 enables the per-camera lifecycle manager so start/stop/
-restart operations own supervised native PPPP/TNP runtimes directly.
+provided, the per-camera lifecycle manager owns supervised native PPPP/TNP
+runtimes and the capability probe supports bounded live reprobe operations.
 
 Security defaults:
 - bind to loopback by default;
@@ -28,6 +28,8 @@ from urllib.parse import urlsplit
 
 import yi_tnp_oracle as oracle
 from yi_addon_backend import YiAddonBackend
+from yi_capability_cache import YiCapabilityCache
+from yi_capability_probe_runtime import YiCapabilityProbe
 from yi_runtime_lifecycle import YiRuntimeLifecycleManager, build_default_config
 
 CAMERA_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})$")
@@ -170,7 +172,7 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
 
         match = REPROBE_RE.fullmatch(path)
         if match:
-            status, payload = self.server.backend.reprobe_not_ready(match.group(1))
+            status, payload = self.server.backend.reprobe_camera(match.group(1))
             self._json(status, payload)
             return
 
@@ -193,6 +195,7 @@ def main() -> int:
     parser.add_argument("--terminate-grace", type=float, default=3.0)
     parser.add_argument("--restart-delay", type=float, default=1.0)
     parser.add_argument("--max-restart-delay", type=float, default=30.0)
+    parser.add_argument("--probe-duration", type=float, default=8.0)
     args = parser.parse_args()
 
     if args.env_file is not None:
@@ -202,12 +205,16 @@ def main() -> int:
 
     if not 1 <= args.port <= 65535:
         raise SystemExit("--port must be between 1 and 65535")
+    if args.probe_duration <= 0:
+        raise SystemExit("--probe-duration must be greater than zero")
 
     token = os.getenv("YI_ADDON_API_TOKEN") or None
     if not _is_loopback(args.bind) and token is None:
         raise SystemExit("non-loopback bind requires YI_ADDON_API_TOKEN")
 
     lifecycle: YiRuntimeLifecycleManager | None = None
+    capability_probe: YiCapabilityProbe | None = None
+    capability_cache = YiCapabilityCache()
     if not args.disable_lifecycle:
         if args.env_file is None:
             raise SystemExit("--env-file is required unless --disable-lifecycle is used")
@@ -224,8 +231,18 @@ def main() -> int:
             max_restart_delay=args.max_restart_delay,
         )
         lifecycle = YiRuntimeLifecycleManager(config)
+        capability_probe = YiCapabilityProbe(
+            config,
+            capability_cache,
+            duration_seconds=args.probe_duration,
+        )
 
-    backend = YiAddonBackend(timeout=args.timeout, lifecycle=lifecycle)
+    backend = YiAddonBackend(
+        timeout=args.timeout,
+        capability_cache=capability_cache,
+        lifecycle=lifecycle,
+        capability_probe=capability_probe,
+    )
     if not args.no_initial_discovery:
         try:
             backend.discover(fetch_tnp=True)
@@ -255,6 +272,7 @@ def main() -> int:
                 "port": args.port,
                 "authentication": "bearer" if token is not None else "loopback_only",
                 "runtime_lifecycle_ready": lifecycle is not None,
+                "reprobe_ready": capability_probe is not None,
                 "secrets_exposed": False,
             },
             separators=(",", ":"),
