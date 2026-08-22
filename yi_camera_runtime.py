@@ -16,10 +16,12 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from yi_camera_manager import CameraDevice, YiCameraManager
+from yi_capability_cache import YiCapabilityCache
 from yi_tnp_oracle import CameraMaterial
 
 
 PROVEN_PROFILE = "tnp_v2_resolution_1_h264_aac"
+SUPPORTED_PROFILES = frozenset({PROVEN_PROFILE})
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,7 @@ class RuntimeDescriptor:
     encrypted: bool | None
     wakeup: bool
     profile_candidate: str
+    profile_source: str
 
     def safe_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,12 +57,25 @@ def _select_device(devices: list[CameraDevice], stable_id: str) -> CameraDevice:
     return selected
 
 
+def _profile_for(stable_id: str) -> tuple[str, str]:
+    """Prefer a previously proven profile, otherwise return a safe probe candidate."""
+    try:
+        cached = YiCapabilityCache().get_success(stable_id)
+    except RuntimeError:
+        # Cache corruption must never make a previously working camera unusable.
+        return PROVEN_PROFILE, "default_probe_candidate_cache_error"
+    if cached is not None and cached.profile in SUPPORTED_PROFILES:
+        return cached.profile, "capability_cache"
+    return PROVEN_PROFILE, "default_probe_candidate"
+
+
 def runtime_material_for(stable_id: str, *, timeout: float = 10.0) -> tuple[CameraMaterial, RuntimeDescriptor]:
     """Resolve one camera by stable_id and return fresh TNP runtime material.
 
-    No model whitelist is consulted. The returned profile is a probe candidate,
-    not a declaration of compatibility; actual support is established only by
-    observing valid media/control behavior in the runtime probe.
+    No model whitelist is consulted. A cached profile is trusted only when it
+    was previously recorded after observed H264/AAC success and is implemented
+    by this runtime. Otherwise the proven TNP-v2 profile is merely a probe
+    candidate; actual support is established by observed media/control behavior.
     """
 
     manager = YiCameraManager(timeout=timeout)
@@ -68,6 +84,7 @@ def runtime_material_for(stable_id: str, *, timeout: float = 10.0) -> tuple[Came
         devices = manager.discover(fetch_tnp=False)
         selected = _select_device(devices, stable_id)
         material = manager.material_for(stable_id)
+        profile, profile_source = _profile_for(stable_id)
         descriptor = RuntimeDescriptor(
             stable_id=selected.stable_id,
             stream_id=selected.stream_id,
@@ -78,7 +95,8 @@ def runtime_material_for(stable_id: str, *, timeout: float = 10.0) -> tuple[Came
             cloud_online_reported=selected.cloud_online_reported,
             encrypted=selected.encrypted,
             wakeup=selected.wakeup,
-            profile_candidate=PROVEN_PROFILE,
+            profile_candidate=profile,
+            profile_source=profile_source,
         )
         return material, descriptor
     except Exception:
