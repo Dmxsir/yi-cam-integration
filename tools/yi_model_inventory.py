@@ -9,7 +9,8 @@ the authoritative running firmware version.
 Model resolution keeps evidence sources separate:
 - APK feature_config registry is authoritative for mappings present in the APK.
 - Supplemental external evidence is used only for an exact raw-model + cloud
-  version match when the APK registry has no unique mapping.
+  version match. It can either resolve a missing APK mapping or add a marketing
+  name / firmware-family cross-check to an already-known mapping.
 """
 
 from __future__ import annotations
@@ -94,7 +95,7 @@ def main() -> int:
     print(f"camera_count={len(cameras)}")
     print("secret_fields_logged=false")
     print("firmware_note=cloud_inter_version_is_version_like_only_not_authoritative_firmware")
-    print("resolution_policy=apk_registry_then_exact_raw_model_plus_cloud_version_external_evidence")
+    print("resolution_policy=apk_registry_plus_exact_raw_model_and_cloud_version_external_crosscheck")
 
     for index, camera in enumerate(cameras):
         raw_model = str(camera.get("model", ""))
@@ -112,17 +113,24 @@ def main() -> int:
         if registry_model != "UNKNOWN":
             resolved = registry_model
             resolution_evidence = registry_evidence
-            marketing_name = "UNKNOWN"
+            if supplemental is not None and supplemental.model != registry_model:
+                resolution_evidence += "+external_conflict"
+            marketing_name = supplemental.marketing_name if supplemental is not None else "UNKNOWN"
+            supplemental_evidence = supplemental.evidence if supplemental is not None else "NONE"
             evidence_sources = "APK_feature_config"
+            if supplemental is not None:
+                evidence_sources += "," + ",".join(supplemental.sources)
         elif supplemental is not None:
             resolved = supplemental.model
             resolution_evidence = supplemental.evidence
             marketing_name = supplemental.marketing_name
+            supplemental_evidence = supplemental.evidence
             evidence_sources = ",".join(supplemental.sources)
         else:
             resolved = "UNKNOWN"
             resolution_evidence = registry_evidence
             marketing_name = "UNKNOWN"
+            supplemental_evidence = "NONE"
             evidence_sources = "NONE"
 
         print(f"camera[{index}].name={str(camera.get('name', ''))}")
@@ -133,6 +141,7 @@ def main() -> int:
         print(f"camera[{index}].apk_candidate_models={apk_candidate_models}")
         print(f"camera[{index}].firmware_branches={branches}")
         print(f"camera[{index}].cloud_inter_version={inter_version}")
+        print(f"camera[{index}].supplemental_evidence={supplemental_evidence}")
         print(f"camera[{index}].evidence_sources={evidence_sources}")
         print(f"camera[{index}].p2p_type={camera.get('type')}")
         print(f"camera[{index}].online={camera.get('online') is True}")
