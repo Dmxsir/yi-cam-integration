@@ -1,6 +1,7 @@
 # YI Home Integration Roadmap
 
 The target product architecture is documented in [`docs/product-architecture.md`](docs/product-architecture.md).
+The detailed implementation sequence and exit gates are documented in [`docs/development-plan.md`](docs/development-plan.md).
 
 ## Product target
 
@@ -99,22 +100,18 @@ Live generic-runtime evidence (2026-08-23):
 - Cached PTZ profile: `tnp_v2_resolution_1_h264_aac`, H264 1920x1080, AAC 16000 Hz mono.
 - Cache output reported `secrets_exposed=false`.
 
-Exit criteria:
-
-- Known model-83 cameras work through the generic path. **PASS: pool model 83.**
-- At least one additional raw model is tested without adding a model whitelist. **PASS: PTZ model 40.**
-- Capability/profile result caching is implemented and live write/read is proven. **PASS.**
-
 Exit criteria: PASS.
 
 ### Phase 6C — Add-on service/API — ACTIVE
 
-Goal: turn the reusable backend into a long-running versioned service suitable for a Home Assistant Add-on.
+Goal: turn the reusable backend into the long-running engine that will be packaged as the Home Assistant Add-on.
+
+#### Phase 6C.1 — Backend state + HTTP API — COMPLETE
 
 Current implementation:
 
 - `yi_addon_backend.py` — thread-safe secret-safe Add-on state core.
-- `yi_addon_service.py` — minimal versioned HTTP service using only the standard library.
+- `yi_addon_service.py` — versioned HTTP service.
 - `tools/phase3_pppp_probe/run_phase6c_api_smoke.sh` — live API/discovery/cache/graceful-shutdown validation.
 
 Current API surface:
@@ -135,7 +132,6 @@ Security/runtime rules already implemented:
 - Capability cache data is exposed only in its secret-safe form.
 - Temporary cloud discovery failure does not kill the service; `/health` remains available and discovery can be retried.
 - SIGINT/SIGTERM trigger graceful HTTP shutdown.
-- Restart/reprobe routes exist in the v1 contract but return a controlled `runtime_lifecycle_not_ready` response until the lifecycle manager is attached.
 
 Live API smoke proof (2026-08-23):
 
@@ -149,46 +145,79 @@ Live API smoke proof (2026-08-23):
 - SIGTERM graceful shutdown passed.
 - Smoke test completed with `PHASE6C_API_SMOKE=PASS`.
 
-Completed Phase 6C requirements:
+Exit criteria: PASS.
 
-- Versioned secret-safe HTTP API skeleton. **PASS.**
-- Live API/discovery/cache/graceful-shutdown smoke proof. **PASS.**
-- Account/camera state exposed through reusable backend core. **PASS.**
+#### Phase 6C.2 — Per-camera runtime lifecycle manager — ACTIVE
 
-Remaining Phase 6C requirements:
+Next implementation target:
 
-- Per-camera lifecycle manager that starts/stops/restarts supervised native runtimes by `stable_id`.
-- Reprobe operation wired to live capability probing and cache refresh.
-- Structured running/stalled/restarting/error runtime states.
-- Stable RTSP publication owned by the service/Add-on rather than development go2rtc configuration.
+- Backend owns one independent supervised runtime per `stable_id`.
+- Start/stop/restart selected camera without affecting others.
+- Lifecycle manager recreates a camera runtime after supervisor stall exit.
+- Structured states: `stopped`, `starting`, `running`, `restarting`, `stopping`, `error`.
+- Global backend shutdown leaves no relay/QEMU/FFmpeg descendants.
+
+#### Phase 6C.3 — Runtime control API — PLANNED
+
+Add/wire:
+
+- `POST /api/v1/cameras/{stable_id}/start`
+- `POST /api/v1/cameras/{stable_id}/stop`
+- `POST /api/v1/cameras/{stable_id}/restart`
+
+Exit gate: start/status/restart/stop proven through HTTP only.
+
+#### Phase 6C.4 — Live reprobe + cache refresh — PLANNED
+
+- Wire `POST /api/v1/cameras/{stable_id}/reprobe` to a bounded live media probe.
+- Update capability cache only after observed H264/AAC success.
+- Preserve prior proven record on probe failure.
+- Resume previous runtime state when appropriate.
+
+#### Phase 6C.5 — Add-on-owned RTSP publication — PLANNED
+
+- Remove dependency on hand-maintained development go2rtc entries.
+- Stable media endpoint derived from immutable `stable_id`.
+- Add-on/service owns publisher configuration and restart behavior.
+- Two concurrent Add-on-managed RTSP streams must survive isolated camera recovery.
+
+#### Phase 6C.6 — Persistence/startup policy — PLANNED
+
+- Persist non-secret runtime state/cache under Add-on `/data`.
+- Restore intended camera runtime state after backend restart.
+- Safe boot behavior during temporary YI cloud outage.
+
+Phase 6C closes only after 6C.1–6C.6 pass.
 
 ### Phase 6D — Home Assistant Add-on packaging — PLANNED
 
-Goal: package the engine/runtime for HA OS/Supervisor.
+Goal: move the engine/runtime from development infrastructure into HA OS/Supervisor.
 
-Requirements:
+Planned stages:
 
-- Add-on Docker image.
-- Multi-architecture strategy documented/tested.
-- Native runtime dependencies packaged.
-- Add-on config/options schema.
-- Secure credential handling.
-- Internal API and RTSP ports.
-- Health checks and persistent state/cache.
+- 6D.1 container/native runtime packaging.
+- 6D.2 Add-on options, credential handling and persistent `/data`.
+- 6D.3 API/RTSP networking and health checks.
+- 6D.4 architecture support/validation.
+
+Exit gate:
+
+- Fresh HA OS Add-on install discovers the account, exposes at least two camera streams, and survives Add-on restart without terminal configuration.
 
 ### Phase 6E — Home Assistant Custom Integration — PLANNED
 
 Goal: expose the Add-on cleanly inside Home Assistant.
 
-Requirements:
+Planned stages:
 
-- Config Flow.
-- Add-on discovery/connectivity check.
-- Device Registry entries based on `stable_id`.
-- `camera` entities.
-- Online/runtime/connectivity sensors.
-- Diagnostic data with secrets removed.
-- Restart/reprobe controls where useful.
+- 6E.1 Config Flow and Add-on/API validation.
+- 6E.2 Device Registry entries based on `stable_id`.
+- 6E.3 camera/status/control entities.
+- 6E.4 secret-safe diagnostics.
+
+Exit gate:
+
+- Add Integration → YI Home automatically creates devices/entities and live camera view without YAML.
 
 ### Phase 6F — Zero-manual-config onboarding — PLANNED
 
@@ -204,11 +233,15 @@ Install Add-on
 
 No UID/DID/model/RTSP/YAML required from the user.
 
+Exit gate: a fresh setup can be completed from the Home Assistant UI without terminal access.
+
 ### Phase 6G — Frigate integration/export — PLANNED
 
-- Stable RTSP endpoints from the Add-on.
-- Documentation/generation helpers for Frigate.
+- Stable Add-on-owned RTSP endpoints.
+- Documentation/config helper from safe camera metadata.
 - Frigate remains optional and separate from core Home Assistant camera support.
+
+Exit gate: Frigate can consume the Add-on stream without any change to YI runtime code.
 
 ## Later work
 
