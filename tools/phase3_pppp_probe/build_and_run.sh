@@ -45,10 +45,9 @@ patchelf --replace-needed libstdc++.so libstdc++.so.6 "$BUILD/libPPPP_API.so"
 patchelf --add-needed libandroid_compat.so "$BUILD/libPPPP_API.so"
 
 # Android/Bionic tags ordinary imports with the `LIBC` symbol-version
-# namespace. glibc uses GLIBC_* instead. patchelf can clear individual symbol
-# versions, but it intentionally leaves the ELF VERNEED record itself. The
-# glibc loader validates that record before dlopen succeeds, so normalize both
-# the undefined-symbol version indexes and DT_VERNEEDNUM.
+# namespace. glibc uses GLIBC_* instead. Normalize the undefined-symbol version
+# indexes and disable the dynamic VERNEED/VERSYM tags so the GNU loader falls
+# back to ordinary symbol-name resolution.
 python3 "$SRC_DIR/clear_android_versions.py" "$BUILD/libPPPP_API.so"
 
 "$CC" -O2 -Wall -Wextra \
