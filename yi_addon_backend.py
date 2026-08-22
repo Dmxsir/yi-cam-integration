@@ -26,7 +26,7 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _safe_error(exc: BaseException) -> dict[str, str]:
+def _safe_error(exc: Exception) -> dict[str, str]:
     if isinstance(exc, cloud.YiCloudError):
         return {"category": exc.category, "message": exc.safe_message}
     if isinstance(exc, (TimeoutError, OSError)):
@@ -106,7 +106,7 @@ class YiAddonBackend:
                 device.stable_id: CameraState(device=device, capability=self._capability_for(device.stable_id))
                 for device in devices
             }
-        except BaseException as exc:
+        except Exception as exc:
             safe = _safe_error(exc)
             with self._lock:
                 self._last_error = safe
