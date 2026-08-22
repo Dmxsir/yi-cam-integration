@@ -1,0 +1,20 @@
+name: "YI Home"
+version: "0.1.0"
+slug: "yi_home"
+description: "Native YI Home camera runtime for Home Assistant"
+url: "https://github.com/Dmxsir/yi-cam-integration"
+arch:
+  - amd64
+startup: application
+boot: auto
+init: false
+stage: experimental
+apparmor: true
+discovery:
+  - yi_home
+ports:
+  8554/tcp: 8554
+ports_description:
+  8554/tcp: "YI Home RTSP"
+options: {}
+schema: false
