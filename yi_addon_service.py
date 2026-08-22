@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Versioned HTTP service for the future YI Home Add-on.
+"""Versioned HTTP service for the YI Home App/Add-on engine.
 
-The service exposes only secret-safe backend/runtime state. When an env file is
-provided, the per-camera lifecycle manager owns supervised native PPPP/TNP
-runtimes and the capability probe supports bounded live reprobe operations.
-
-Security defaults:
-- bind to loopback by default;
-- a non-loopback bind requires YI_ADDON_API_TOKEN;
-- API responses never include YI UID/DID/password/token/license/InitString.
+The service exposes only secret-safe backend/runtime state. Optional managed
+go2rtc publication keeps media publishing inside the App while PPPP/TNP session
+ownership remains in the per-camera lifecycle manager.
 """
 
 from __future__ import annotations
@@ -30,7 +25,12 @@ import yi_tnp_oracle as oracle
 from yi_addon_backend import YiAddonBackend
 from yi_capability_cache import YiCapabilityCache
 from yi_capability_probe_runtime import YiCapabilityProbe
-from yi_runtime_lifecycle import YiRuntimeLifecycleManager, build_default_config
+from yi_media_publisher import Go2RTCPublisherConfig, YiGo2RTCPublisher
+from yi_runtime_lifecycle import (
+    YiRuntimeLifecycleManager,
+    build_default_config,
+    default_runtime_state_dir,
+)
 
 CAMERA_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})$")
 STATUS_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/status$")
@@ -59,8 +59,6 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, _format: str, *_args: object) -> None:
-        # Avoid logging request paths/headers until a structured secret-safe
-        # Add-on logger is introduced.
         return
 
     def _authorized(self) -> bool:
@@ -71,8 +69,7 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
         prefix = "Bearer "
         if not header.startswith(prefix):
             return False
-        supplied = header[len(prefix):]
-        return hmac.compare_digest(supplied, token)
+        return hmac.compare_digest(header[len(prefix):], token)
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -96,7 +93,7 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
 
     def _preflight(self) -> str | None:
         if not self._authorized():
-            self._error(HTTPStatus.UNAUTHORIZED, "unauthorized", "A valid Add-on API token is required.")
+            self._error(HTTPStatus.UNAUTHORIZED, "unauthorized", "A valid App API token is required.")
             return None
         parsed = urlsplit(self.path)
         if parsed.query or parsed.fragment:
@@ -180,7 +177,7 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="YI Home Add-on backend API service")
+    parser = argparse.ArgumentParser(description="YI Home App/Add-on backend API service")
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--bind", default=os.getenv("YI_ADDON_BIND", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("YI_ADDON_PORT", "8099")))
@@ -196,6 +193,11 @@ def main() -> int:
     parser.add_argument("--restart-delay", type=float, default=1.0)
     parser.add_argument("--max-restart-delay", type=float, default=30.0)
     parser.add_argument("--probe-duration", type=float, default=8.0)
+    parser.add_argument("--go2rtc-bin", type=Path)
+    parser.add_argument("--go2rtc-state-dir", type=Path)
+    parser.add_argument("--go2rtc-api-port", type=int, default=1984)
+    parser.add_argument("--go2rtc-rtsp-port", type=int, default=8554)
+    parser.add_argument("--go2rtc-rtsp-bind", default="127.0.0.1")
     args = parser.parse_args()
 
     if args.env_file is not None:
@@ -203,14 +205,35 @@ def main() -> int:
             raise SystemExit(f"env file not found: {args.env_file}")
         oracle.load_env_file(args.env_file)
 
-    if not 1 <= args.port <= 65535:
-        raise SystemExit("--port must be between 1 and 65535")
+    for value, label in (
+        (args.port, "--port"),
+        (args.go2rtc_api_port, "--go2rtc-api-port"),
+        (args.go2rtc_rtsp_port, "--go2rtc-rtsp-port"),
+    ):
+        if not 1 <= value <= 65535:
+            raise SystemExit(f"{label} must be between 1 and 65535")
     if args.probe_duration <= 0:
         raise SystemExit("--probe-duration must be greater than zero")
 
     token = os.getenv("YI_ADDON_API_TOKEN") or None
     if not _is_loopback(args.bind) and token is None:
         raise SystemExit("non-loopback bind requires YI_ADDON_API_TOKEN")
+
+    media_publisher: YiGo2RTCPublisher | None = None
+    if args.go2rtc_bin is not None:
+        publisher_state = args.go2rtc_state_dir or (
+            (args.runtime_state_dir or default_runtime_state_dir()) / "publisher"
+        )
+        media_publisher = YiGo2RTCPublisher(
+            Go2RTCPublisherConfig(
+                binary=args.go2rtc_bin.expanduser().resolve(),
+                state_dir=publisher_state.expanduser().resolve(),
+                api_host="127.0.0.1",
+                api_port=args.go2rtc_api_port,
+                rtsp_bind=args.go2rtc_rtsp_bind,
+                rtsp_port=args.go2rtc_rtsp_port,
+            )
+        )
 
     lifecycle: YiRuntimeLifecycleManager | None = None
     capability_probe: YiCapabilityProbe | None = None
@@ -229,6 +252,8 @@ def main() -> int:
             terminate_grace=args.terminate_grace,
             restart_delay=args.restart_delay,
             max_restart_delay=args.max_restart_delay,
+            media_ingest_host=(media_publisher.ingest_host if media_publisher is not None else None),
+            media_ingest_port=(media_publisher.ingest_port if media_publisher is not None else None),
         )
         lifecycle = YiRuntimeLifecycleManager(config)
         capability_probe = YiCapabilityProbe(
@@ -242,13 +267,14 @@ def main() -> int:
         capability_cache=capability_cache,
         lifecycle=lifecycle,
         capability_probe=capability_probe,
+        media_publisher=media_publisher,
     )
     if not args.no_initial_discovery:
         try:
             backend.discover(fetch_tnp=True)
         except Exception:
-            # The service remains available so /health can report state and a
-            # later POST /discover can recover from a temporary cloud outage.
+            # Keep the service alive so health/discover can recover from cloud
+            # or publisher startup problems without crashing the App.
             pass
 
     server = YiAddonHTTPServer((args.bind, args.port), backend, token)
@@ -273,6 +299,7 @@ def main() -> int:
                 "authentication": "bearer" if token is not None else "loopback_only",
                 "runtime_lifecycle_ready": lifecycle is not None,
                 "reprobe_ready": capability_probe is not None,
+                "media_publisher_enabled": media_publisher is not None,
                 "secrets_exposed": False,
             },
             separators=(",", ":"),
