@@ -8,18 +8,22 @@ ffprobe, and only then atomically updates the capability cache.
 A failed probe never overwrites a previously proven capability record.
 Transient PPPP session handoff failures are retried in a bounded way because a
 reprobe may follow immediately after stopping an existing camera runtime.
+Every relay attempt owns a dedicated process group so timeout cleanup cannot
+leave relay/QEMU/FFmpeg descendants behind.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from yi_camera_runtime import PROVEN_PROFILE
 from yi_capability_cache import CapabilityRecord, YiCapabilityCache
@@ -118,10 +122,11 @@ class YiCapabilityProbe:
         capability_cache: YiCapabilityCache,
         *,
         duration_seconds: float = 8.0,
-        timeout_margin_seconds: float = 45.0,
+        timeout_margin_seconds: float = 15.0,
         attempts: int = 2,
-        session_settle_seconds: float = 1.5,
-        retry_delay_seconds: float = 1.5,
+        session_settle_seconds: float = 3.0,
+        retry_delay_seconds: float = 2.0,
+        terminate_grace_seconds: float = 3.0,
     ) -> None:
         config.validate()
         if duration_seconds <= 0 or timeout_margin_seconds <= 0:
@@ -130,6 +135,8 @@ class YiCapabilityProbe:
             raise ValueError("probe attempts must be between 1 and 3")
         if session_settle_seconds < 0 or retry_delay_seconds < 0:
             raise ValueError("probe handoff delays must not be negative")
+        if terminate_grace_seconds <= 0:
+            raise ValueError("probe terminate grace must be greater than zero")
         self.config = config
         self.capability_cache = capability_cache
         self.duration_seconds = float(duration_seconds)
@@ -137,6 +144,11 @@ class YiCapabilityProbe:
         self.attempts = int(attempts)
         self.session_settle_seconds = float(session_settle_seconds)
         self.retry_delay_seconds = float(retry_delay_seconds)
+        self.terminate_grace_seconds = float(terminate_grace_seconds)
+
+    @property
+    def attempt_timeout_seconds(self) -> float:
+        return self.duration_seconds + self.timeout_margin_seconds
 
     def _relay_command(self, stable_id: str, output: Path) -> list[str]:
         cfg = self.config
@@ -163,29 +175,74 @@ class YiCapabilityProbe:
             str(output),
         ]
 
-    def _run_relay_attempt(self, key: str, media_path: Path) -> None:
-        timeout = self.duration_seconds + self.timeout_margin_seconds
+    def _terminate_group(self, process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
         try:
-            completed = subprocess.run(
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except (PermissionError, OSError):
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                return
+        try:
+            process.wait(timeout=self.terminate_grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except (PermissionError, OSError):
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def _run_relay_attempt(
+        self,
+        key: str,
+        media_path: Path,
+        log_stream: BinaryIO,
+        attempt: int,
+    ) -> None:
+        marker = (
+            f"\n=== reprobe attempt {attempt}/{self.attempts}; "
+            f"timeout={self.attempt_timeout_seconds:g}s ===\n"
+        ).encode("utf-8")
+        log_stream.write(marker)
+        log_stream.flush()
+        try:
+            process = subprocess.Popen(
                 self._relay_command(key, media_path),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                check=False,
+                stderr=log_stream,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise CapabilityProbeError(
-                "probe_timeout",
-                "The live camera capability probe timed out.",
-            ) from exc
         except OSError as exc:
             raise CapabilityProbeError(
                 "probe_spawn_failed",
                 "The live camera capability probe could not be started.",
             ) from exc
 
-        if completed.returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
+        try:
+            returncode = process.wait(timeout=self.attempt_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_group(process)
+            raise CapabilityProbeError(
+                "probe_timeout",
+                "The live camera capability probe timed out.",
+            ) from exc
+
+        if returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
             raise CapabilityProbeError(
                 "probe_runtime_failed",
                 "The camera did not produce valid media during the capability probe.",
@@ -195,6 +252,11 @@ class YiCapabilityProbe:
         key = _stable_id(stable_id)
         probe_dir = self.config.state_dir / "probes"
         probe_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(probe_dir, 0o700)
+        except OSError:
+            pass
+        last_log = probe_dir / f"{key}-last.log"
 
         if session_handoff and self.session_settle_seconds > 0:
             time.sleep(self.session_settle_seconds)
@@ -206,20 +268,29 @@ class YiCapabilityProbe:
             last_error: CapabilityProbeError | None = None
             attempts_used = 0
 
-            for attempt in range(1, self.attempts + 1):
-                attempts_used = attempt
-                media_path.unlink(missing_ok=True)
+            with last_log.open("wb", buffering=0) as log_stream:
                 try:
-                    self._run_relay_attempt(key, media_path)
-                    last_error = None
-                    break
-                except CapabilityProbeError as exc:
-                    last_error = exc
-                    retryable = exc.category in {"probe_runtime_failed", "probe_timeout"}
-                    if attempt >= self.attempts or not retryable:
-                        raise
-                    if self.retry_delay_seconds > 0:
-                        time.sleep(self.retry_delay_seconds)
+                    os.chmod(last_log, 0o600)
+                except OSError:
+                    pass
+                for attempt in range(1, self.attempts + 1):
+                    attempts_used = attempt
+                    media_path.unlink(missing_ok=True)
+                    try:
+                        self._run_relay_attempt(key, media_path, log_stream, attempt)
+                        last_error = None
+                        break
+                    except CapabilityProbeError as exc:
+                        last_error = exc
+                        log_stream.write(
+                            f"reprobe_attempt_result={exc.category}\n".encode("utf-8")
+                        )
+                        log_stream.flush()
+                        retryable = exc.category in {"probe_runtime_failed", "probe_timeout"}
+                        if attempt >= self.attempts or not retryable:
+                            raise
+                        if self.retry_delay_seconds > 0:
+                            time.sleep(self.retry_delay_seconds)
 
             if last_error is not None:
                 raise last_error
@@ -240,7 +311,7 @@ class YiCapabilityProbe:
                         stdin=subprocess.DEVNULL,
                         stdout=output,
                         stderr=subprocess.DEVNULL,
-                        timeout=15.0,
+                        timeout=10.0,
                         check=False,
                     )
             except (subprocess.TimeoutExpired, OSError) as exc:
