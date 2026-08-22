@@ -10,10 +10,10 @@ CC="${CC:-aarch64-linux-gnu-gcc}"
 QEMU="${QEMU:-qemu-aarch64}"
 SYSROOT="${QEMU_SYSROOT:-/usr/aarch64-linux-gnu}"
 
-for tool in "$CC" "$QEMU" readelf file; do
+for tool in "$CC" "$QEMU" readelf file patchelf; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool missing: $tool" >&2
-        echo "Ubuntu packages: sudo apt-get install qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross" >&2
+        echo "Ubuntu packages: sudo apt-get install qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross patchelf" >&2
         exit 2
     fi
 done
@@ -31,14 +31,27 @@ cp -f "$LIB" "$BUILD/libPPPP_API.so"
     -o "$COMPAT/liblog.so" "$SRC_DIR/liblog_shim.c"
 
 "$CC" -shared -fPIC -O2 -Wall -Wextra \
-    -Wl,-soname,libc.so \
-    -o "$COMPAT/libc.so" "$SRC_DIR/libc_shim.c"
+    -Wl,-soname,libandroid_compat.so \
+    -o "$COMPAT/libandroid_compat.so" "$SRC_DIR/libc_shim.c"
 
-for name in libm.so libdl.so libstdc++.so; do
-    "$CC" -shared -fPIC -O2 -Wall -Wextra \
-        -Wl,-soname,"$name" \
-        -o "$COMPAT/$name" "$SRC_DIR/empty_shim.c"
-done
+# Re-target Android/Bionic SONAMEs to the GNU/Linux ARM64 runtime libraries.
+patchelf --replace-needed libc.so libc.so.6 "$BUILD/libPPPP_API.so"
+patchelf --replace-needed libm.so libm.so.6 "$BUILD/libPPPP_API.so"
+patchelf --replace-needed libdl.so libdl.so.2 "$BUILD/libPPPP_API.so"
+patchelf --replace-needed libstdc++.so libstdc++.so.6 "$BUILD/libPPPP_API.so"
+patchelf --add-needed libandroid_compat.so "$BUILD/libPPPP_API.so"
+
+# Bionic symbols may carry Android version labels (for example LIBC). glibc
+# exposes the same named functions under GLIBC_* versions, so clear only the
+# version requirement on undefined imports.
+while IFS= read -r symbol; do
+    [[ -n "$symbol" ]] || continue
+    patchelf --clear-symbol-version "$symbol" "$BUILD/libPPPP_API.so" || true
+done < <(
+    readelf -Ws "$BUILD/libPPPP_API.so" |
+    awk '$7 == "UND" && $8 != "" {name=$8; sub(/@.*/, "", name); print name}' |
+    sort -u
+)
 
 "$CC" -O2 -Wall -Wextra \
     -o "$BUILD/pppp_probe" "$SRC_DIR/pppp_probe.c" -ldl
@@ -54,8 +67,14 @@ readelf -l "$BUILD/pppp_probe" | grep -F 'Requesting program interpreter' || tru
 
 echo
 
-echo "--- LIBRARY ---"
+echo "--- PATCHED LIBRARY ---"
 file "$BUILD/libPPPP_API.so"
+readelf -d "$BUILD/libPPPP_API.so" | grep NEEDED || true
+
+echo
+
+echo "--- REMAINING VERSION REQUIREMENTS ---"
+readelf -V "$BUILD/libPPPP_API.so" | grep -E 'Name: (LIBC|LIBM|LIBDL|LIBSTDCPP|LIBLOG)' || true
 
 echo
 
