@@ -133,6 +133,8 @@ try:
         and publication.get('configured') is True
         and publication.get('producer_registered') is True
         and int(publication.get('mpegts_producer_count',0)) >= 1
+        and publication.get('producer_media_ready') is True
+        and int(publication.get('mpegts_ready_producer_count',0)) >= 1
         and isinstance(r.get('pid'),int)):
         print(r['pid'])
 except Exception:
@@ -142,9 +144,10 @@ PY
   [[ -n "$FIRST_RUNTIME_PID" ]] && break
   sleep 0.5
 done
-[[ -n "$FIRST_RUNTIME_PID" ]] || fail "go2rtc never registered the camera MPEG-TS producer"
+[[ -n "$FIRST_RUNTIME_PID" ]] || fail "go2rtc never registered a media-ready camera MPEG-TS producer"
 echo "mpegts_ingest_attached=PASS"
 echo "go2rtc_producer_registered=PASS"
+echo "go2rtc_producer_media_ready=PASS"
 echo "runtime_pid_initial=$FIRST_RUNTIME_PID"
 
 if ! timeout 25 ffprobe -v error -rtsp_transport tcp \
@@ -182,6 +185,8 @@ try:
         and int(r.get('published_bytes',0)) >= 65536
         and publication.get('producer_registered') is True
         and int(publication.get('mpegts_producer_count',0)) >= 1
+        and publication.get('producer_media_ready') is True
+        and int(publication.get('mpegts_ready_producer_count',0)) >= 1
         and isinstance(pid,int) and pid != old):
         print(pid)
 except Exception:
@@ -191,9 +196,10 @@ PY
   [[ -n "$SECOND_RUNTIME_PID" ]] && break
   sleep 0.5
 done
-[[ -n "$SECOND_RUNTIME_PID" ]] || fail "camera did not re-register its MPEG-TS producer after restart"
+[[ -n "$SECOND_RUNTIME_PID" ]] || fail "camera did not re-register a media-ready MPEG-TS producer after restart"
 echo "runtime_republish_after_restart=PASS"
 echo "go2rtc_producer_reregistered=PASS"
+echo "go2rtc_producer_media_reregistered=PASS"
 echo "runtime_pid_restarted=$SECOND_RUNTIME_PID"
 
 curl -fsS --max-time 3 "$BASE/health" >"$WORK/health-after.json"
