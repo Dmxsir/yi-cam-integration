@@ -10,12 +10,13 @@ BASE="http://127.0.0.1:${PORT}/api/v1"
 WORK="$(mktemp -d)"
 STATE_DIR="$WORK/runtime"
 CACHE_FILE="$WORK/capabilities.json"
+PROBE_LOG="$STATE_DIR/probes/$STABLE_ID-last.log"
 PID=""
 
 cleanup() {
   if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
     kill -TERM "$PID" 2>/dev/null || true
-    for _ in $(seq 1 50); do
+    for _ in $(seq 1 60); do
       kill -0 "$PID" 2>/dev/null || break
       sleep 0.1
     done
@@ -27,13 +28,22 @@ trap cleanup EXIT INT TERM
 
 fail() {
   echo "ERROR: $*" >&2
+  if [[ -f "$WORK/reprobe.json" ]]; then
+    echo "--- reprobe response ---" >&2
+    cat "$WORK/reprobe.json" >&2 || true
+    echo >&2
+  fi
+  if [[ -f "$PROBE_LOG" ]]; then
+    echo "--- reprobe log ---" >&2
+    cat "$PROBE_LOG" >&2 || true
+  fi
   if [[ -f "$WORK/service.log" ]]; then
     echo "--- service log ---" >&2
     cat "$WORK/service.log" >&2 || true
   fi
   if [[ -f "$STATE_DIR/$STABLE_ID.log" ]]; then
     echo "--- camera runtime log (tail) ---" >&2
-    tail -n 80 "$STATE_DIR/$STABLE_ID.log" >&2 || true
+    tail -n 100 "$STATE_DIR/$STABLE_ID.log" >&2 || true
   fi
   exit 1
 }
@@ -42,6 +52,7 @@ fail() {
 [[ -x "$PYTHON" ]] || fail "python missing: $PYTHON"
 [[ -f "$ENV_FILE" ]] || fail "env file missing: $ENV_FILE"
 command -v curl >/dev/null || fail "curl is required"
+command -v pgrep >/dev/null || fail "pgrep is required"
 
 "$PYTHON" -m py_compile \
   "$ROOT/yi_capability_probe_runtime.py" \
@@ -54,6 +65,29 @@ echo "python_compile=PASS"
 echo "test_stable_id=$STABLE_ID"
 echo "production_modified=false"
 echo "isolated_capability_cache=true"
+
+# A previous interrupted development probe must not occupy this non-production
+# test camera. Refuse to hide the condition; terminate only matching stable-id
+# relay process groups from this project before starting the isolated smoke run.
+STALE_PIDS="$(pgrep -f "$ROOT/yi_native_av_relay_stable.py.*--stable-id $STABLE_ID" || true)"
+if [[ -n "$STALE_PIDS" ]]; then
+  echo "stale_test_runtime_detected=true"
+  for stale_pid in $STALE_PIDS; do
+    pgid="$(ps -o pgid= -p "$stale_pid" 2>/dev/null | tr -d ' ' || true)"
+    if [[ -n "$pgid" ]]; then
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+    else
+      kill -TERM "$stale_pid" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  if pgrep -f "$ROOT/yi_native_av_relay_stable.py.*--stable-id $STABLE_ID" >/dev/null 2>&1; then
+    fail "stale test camera runtime could not be cleared"
+  fi
+  echo "stale_test_runtime_cleanup=PASS"
+else
+  echo "stale_test_runtime_detected=false"
+fi
 
 YI_CAPABILITY_CACHE="$CACHE_FILE" \
 "$PYTHON" "$ROOT/yi_addon_service.py" \
@@ -114,7 +148,39 @@ done
 echo "runtime_before_reprobe=PASS"
 echo "runtime_pid_before=$FIRST_PID"
 
-curl -fsS --max-time 90 -X POST "$BASE/cameras/$STABLE_ID/reprobe" >"$WORK/reprobe.json" || fail "HTTP reprobe failed"
+MEDIA_READY=0
+for _ in $(seq 1 80); do
+  if [[ -f "$STATE_DIR/$STABLE_ID.log" ]] && \
+     grep -q 'phase3g_media_readers=STARTED' "$STATE_DIR/$STABLE_ID.log" && \
+     grep -q 'mpegts_mux=STARTED' "$STATE_DIR/$STABLE_ID.log"; then
+    MEDIA_READY=1
+    break
+  fi
+  sleep 0.5
+done
+[[ "$MEDIA_READY" == 1 ]] || fail "initial camera runtime never reached native media"
+INITIAL_MEDIA_COUNT="$(grep -c 'phase3g_media_readers=STARTED' "$STATE_DIR/$STABLE_ID.log" || true)"
+echo "runtime_media_before_reprobe=PASS"
+
+# Give the established session a short steady-state window, then let the API
+# own stop -> handoff -> bounded probe -> resume.
+sleep 2
+set +e
+HTTP_CODE="$(curl -sS --max-time 75 \
+  -o "$WORK/reprobe.json" \
+  -w '%{http_code}' \
+  -X POST "$BASE/cameras/$STABLE_ID/reprobe")"
+CURL_RC=$?
+set -e
+if (( CURL_RC != 0 )); then
+  echo "reprobe_curl_rc=$CURL_RC" >&2
+  echo "reprobe_http_code=${HTTP_CODE:-none}" >&2
+  fail "HTTP reprobe request did not complete within its bounded client window"
+fi
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "reprobe_http_code=$HTTP_CODE" >&2
+  fail "HTTP reprobe returned a non-success response"
+fi
 
 "$PYTHON" - "$WORK/reprobe.json" "$STABLE_ID" <<'PY'
 import json,sys
@@ -126,6 +192,7 @@ assert obj.get('runtime_was_running') is True
 assert obj.get('runtime_resumed') is True
 probe=obj.get('probe') or {}
 assert probe.get('stable_id') == stable
+assert int(probe.get('attempts_used',0)) >= 1
 cap=probe.get('capability') or {}
 assert cap.get('status') == 'success'
 assert cap.get('source') == 'addon_api_reprobe'
@@ -139,6 +206,7 @@ assert obj.get('secrets_exposed') is False
 print('reprobe_http=PASS')
 print('capability_cache_refresh=PASS')
 print('reprobe_media_validation=PASS')
+print('reprobe_attempts_used=' + str(probe.get('attempts_used')))
 print('observed_at=' + str(cap.get('observed_at')))
 PY
 
@@ -167,9 +235,7 @@ try:
     runtime=status.get('runtime') or {}
     pid=runtime.get('pid')
     if runtime.get('runtime_state')=='running' and runtime.get('process_alive') is True and isinstance(pid,int) and pid != old:
-        cap=(status.get('media') or {})
-        if cap:
-            print(pid)
+        print(pid)
 except Exception:
     pass
 PY
@@ -180,6 +246,18 @@ done
 [[ -n "$SECOND_PID" ]] || fail "camera runtime did not resume with a new PID after reprobe"
 echo "runtime_resume_after_reprobe=PASS"
 echo "runtime_pid_after=$SECOND_PID"
+
+RESUMED_MEDIA=0
+for _ in $(seq 1 80); do
+  current_count="$(grep -c 'phase3g_media_readers=STARTED' "$STATE_DIR/$STABLE_ID.log" 2>/dev/null || true)"
+  if [[ "$current_count" =~ ^[0-9]+$ ]] && (( current_count > INITIAL_MEDIA_COUNT )); then
+    RESUMED_MEDIA=1
+    break
+  fi
+  sleep 0.5
+done
+[[ "$RESUMED_MEDIA" == 1 ]] || fail "resumed runtime did not reach native media after reprobe"
+echo "runtime_media_resume_after_reprobe=PASS"
 
 curl -fsS --max-time 15 -X POST "$BASE/cameras/$STABLE_ID/stop" >"$WORK/stop.json"
 STOPPED=0
@@ -201,7 +279,7 @@ done
 echo "runtime_stop=PASS"
 
 kill -TERM "$PID"
-for _ in $(seq 1 50); do
+for _ in $(seq 1 60); do
   if ! kill -0 "$PID" 2>/dev/null; then
     PID=""
     break
@@ -209,5 +287,11 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 [[ -z "$PID" ]] || fail "service did not stop after SIGTERM"
+
+if pgrep -f "$ROOT/yi_native_av_relay_stable.py.*--stable-id $STABLE_ID" >/dev/null 2>&1; then
+  fail "test camera relay remained after service shutdown"
+fi
+
 echo "graceful_shutdown=PASS"
+echo "probe_runtime_cleanup=PASS"
 echo "PHASE6C_REPROBE_SMOKE=PASS"
