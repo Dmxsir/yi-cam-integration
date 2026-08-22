@@ -10,7 +10,7 @@ CC="${CC:-aarch64-linux-gnu-gcc}"
 QEMU="${QEMU:-qemu-aarch64}"
 SYSROOT="${QEMU_SYSROOT:-/usr/aarch64-linux-gnu}"
 
-for tool in "$CC" "$QEMU" readelf file patchelf; do
+for tool in "$CC" "$QEMU" readelf file patchelf python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool missing: $tool" >&2
         echo "Ubuntu packages: sudo apt-get install qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross patchelf" >&2
@@ -23,6 +23,9 @@ if [[ ! -f "$LIB" ]]; then
     exit 3
 fi
 
+# Always rebuild from a clean directory so stale compatibility DSOs from an
+# older probe cannot shadow the real GNU/Linux runtime libraries.
+rm -rf "$BUILD"
 mkdir -p "$COMPAT"
 cp -f "$LIB" "$BUILD/libPPPP_API.so"
 
@@ -41,17 +44,12 @@ patchelf --replace-needed libdl.so libdl.so.2 "$BUILD/libPPPP_API.so"
 patchelf --replace-needed libstdc++.so libstdc++.so.6 "$BUILD/libPPPP_API.so"
 patchelf --add-needed libandroid_compat.so "$BUILD/libPPPP_API.so"
 
-# Bionic symbols may carry Android version labels (for example LIBC). glibc
-# exposes the same named functions under GLIBC_* versions, so clear only the
-# version requirement on undefined imports.
-while IFS= read -r symbol; do
-    [[ -n "$symbol" ]] || continue
-    patchelf --clear-symbol-version "$symbol" "$BUILD/libPPPP_API.so" || true
-done < <(
-    readelf -Ws "$BUILD/libPPPP_API.so" |
-    awk '$7 == "UND" && $8 != "" {name=$8; sub(/@.*/, "", name); print name}' |
-    sort -u
-)
+# Android/Bionic tags ordinary imports with the `LIBC` symbol-version
+# namespace. glibc uses GLIBC_* instead. patchelf can clear individual symbol
+# versions, but it intentionally leaves the ELF VERNEED record itself. The
+# glibc loader validates that record before dlopen succeeds, so normalize both
+# the undefined-symbol version indexes and DT_VERNEEDNUM.
+python3 "$SRC_DIR/clear_android_versions.py" "$BUILD/libPPPP_API.so"
 
 "$CC" -O2 -Wall -Wextra \
     -o "$BUILD/pppp_probe" "$SRC_DIR/pppp_probe.c" -ldl
@@ -73,8 +71,15 @@ readelf -d "$BUILD/libPPPP_API.so" | grep NEEDED || true
 
 echo
 
-echo "--- REMAINING VERSION REQUIREMENTS ---"
-readelf -V "$BUILD/libPPPP_API.so" | grep -E 'Name: (LIBC|LIBM|LIBDL|LIBSTDCPP|LIBLOG)' || true
+echo "--- DYNAMIC VERSION STATE ---"
+readelf -d "$BUILD/libPPPP_API.so" | grep -E 'VERNEED|VERSYM' || true
+
+echo
+
+echo "--- UNDEFINED SYMBOLS STILL VERSIONED ---"
+readelf -Ws "$BUILD/libPPPP_API.so" |
+awk '$7 == "UND" && $8 ~ /@/ {print $8}' |
+sort -u || true
 
 echo
 
