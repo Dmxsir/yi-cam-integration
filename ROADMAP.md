@@ -69,27 +69,17 @@ Live account proof (2026-08-23):
 
 Exit criteria: PASS.
 
-### Phase 6B — Generic camera runtime and capability probe — ACTIVE
+### Phase 6B — Generic camera runtime and capability probe — COMPLETE
 
-Goal: start a camera from `stable_id`, not camera name/model constants.
+Goal: start a camera from `stable_id`, not camera name/model constants, and remember proven behavior rather than treating model numbers as a support whitelist.
 
-Requirements:
-
-- Generic runtime material lookup through Camera Manager.
-- Safe profile/capability probing.
-- Observed capabilities determine support.
-- Cache successful profile/capability results.
-- Integrate existing per-camera session supervisor.
-- Maintain isolation between camera runtimes.
-
-Implementation direction:
+Completed implementation:
 
 - `yi_camera_runtime.py` — reusable Add-on backend/runtime material provider.
 - `yi_native_av_relay_stable.py` — development adapter that feeds a `stable_id` runtime into the already-proven native relay.
-- `yi_capability_cache.py` — persistent secret-safe per-camera profile/media capability cache.
+- `yi_capability_cache.py` — atomic persistent secret-safe per-camera profile/media capability cache.
 - `tools/phase3_pppp_probe/run_phase6b_stable_probe.sh` — compact development probe wrapper; successful H264/AAC observations are recorded in the capability cache.
 - `tools/phase3_pppp_probe/run_phase6b_pool_stable_cutover.sh` — safe production proof that replaces only the pool selector with a `stable_id` runtime and rolls back automatically on validation failure.
-- The initial safe probe profile reuses the proven TNP-v2 command sequence. Success is determined by observed H264/AAC output, not raw model number.
 - Generic runtime prefers a previously proven cached profile when available; cache failure/corruption falls back safely to a probe candidate rather than blocking camera startup.
 
 Live generic-runtime evidence (2026-08-23):
@@ -104,20 +94,30 @@ Live generic-runtime evidence (2026-08-23):
 - This proves the generic runtime path is not restricted to raw model `83`.
 - `pool`, raw model `83`, was cut over in production to `stable_id=867ecdee5a3692c669f9` while keeping the existing per-camera supervisor.
 - Production validation passed for both `yi_warehouse` and `yi_pool`; the pool process was confirmed to be running through `yi_native_av_relay_stable.py` and the warehouse configuration remained unchanged.
-- This proves a known model-83 camera also works through the generic `stable_id` path in the supervised production topology.
 - A raw model `89` attempt failed at `PPPP_Connect`; the same camera was also unavailable in the official YI app at the time, so that result is classified as camera/runtime reachability failure rather than profile incompatibility.
+- Live PTZ probe wrote a capability record to the persistent cache and an independent read returned the same successful record.
+- Cached PTZ profile: `tnp_v2_resolution_1_h264_aac`, H264 1920x1080, AAC 16000 Hz mono.
+- Cache output reported `secrets_exposed=false`.
 
-Exit criteria status:
+Exit criteria:
 
 - Known model-83 cameras work through the generic path. **PASS: pool model 83.**
 - At least one additional raw model is tested without adding a model whitelist. **PASS: PTZ model 40.**
-- Capability/profile result caching is implemented. **IMPLEMENTED; live cache write/read proof pending.**
+- Capability/profile result caching is implemented and live write/read is proven. **PASS.**
 
-### Phase 6C — Add-on service/API — PLANNED
+Exit criteria: PASS.
 
-Goal: turn the backend into a long-running service suitable for a Home Assistant Add-on.
+### Phase 6C — Add-on service/API — ACTIVE
 
-Initial API direction:
+Goal: turn the reusable backend into a long-running versioned service suitable for a Home Assistant Add-on.
+
+Current implementation:
+
+- `yi_addon_backend.py` — thread-safe secret-safe Add-on state core.
+- `yi_addon_service.py` — minimal versioned HTTP service using only the standard library.
+- `tools/phase3_pppp_probe/run_phase6c_api_smoke.sh` — live API/discovery/cache/graceful-shutdown validation.
+
+Current API surface:
 
 - `GET /api/v1/health`
 - `GET /api/v1/cameras`
@@ -127,13 +127,23 @@ Initial API direction:
 - `POST /api/v1/cameras/{stable_id}/restart`
 - `POST /api/v1/cameras/{stable_id}/reprobe`
 
-Requirements:
+Security/runtime rules already implemented:
 
-- Versioned API.
-- Secret-safe responses.
-- Structured runtime state.
-- Per-camera lifecycle management.
-- Graceful startup/shutdown.
+- Loopback-only binding by default.
+- Non-loopback binding requires `YI_ADDON_API_TOKEN` bearer authentication.
+- Secret-bearing connection material is never retained in the API backend snapshot.
+- Capability cache data is exposed only in its secret-safe form.
+- Temporary cloud discovery failure does not kill the service; `/health` remains available and discovery can be retried.
+- SIGINT/SIGTERM trigger graceful HTTP shutdown.
+- Restart/reprobe routes exist in the v1 contract but return a controlled `runtime_lifecycle_not_ready` response until the lifecycle manager is attached.
+
+Remaining Phase 6C requirements:
+
+- Live API smoke proof.
+- Per-camera lifecycle manager that starts/stops/restarts supervised native runtimes by `stable_id`.
+- Reprobe operation wired to live capability probing and cache refresh.
+- Structured running/stalled/restarting/error runtime states.
+- Stable RTSP publication owned by the service/Add-on rather than development go2rtc configuration.
 
 ### Phase 6D — Home Assistant Add-on packaging — PLANNED
 
