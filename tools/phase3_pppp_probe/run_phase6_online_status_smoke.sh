@@ -28,30 +28,51 @@ fail() {
 has_online_export() {
   local candidate="$1"
   [[ -f "$candidate" ]] || return 1
-  readelf -Ws "$candidate" 2>/dev/null | grep -Eq '[[:space:]]PPPP_CheckDevOnline$'
+  # Do not use grep -q here: the script runs with pipefail and an early grep
+  # exit can turn a valid readelf pipeline into SIGPIPE/false-negative on some
+  # toolchain versions.
+  readelf -Ws "$candidate" 2>/dev/null | grep -E '[[:space:]]PPPP_CheckDevOnline$' >/dev/null
 }
 
 extract_online_library_from_apk() {
   local apk="$1"
   local extracted="$WORK/libPPPP_API.from-current-apk.so"
   [[ -f "$apk" ]] || return 1
-  if ! unzip -Z1 "$apk" 2>/dev/null | grep -qx 'lib/arm64-v8a/libPPPP_API.so'; then
-    return 1
-  fi
+
+  rm -f "$extracted"
+  # Attempt extraction directly. This simultaneously proves that the APK has
+  # the ARM64 entry and avoids another pipefail-sensitive listing pipeline.
   if ! unzip -p "$apk" 'lib/arm64-v8a/libPPPP_API.so' >"$extracted" 2>/dev/null; then
     rm -f "$extracted"
     return 1
   fi
-  if ! has_online_export "$extracted"; then
+  if [[ ! -s "$extracted" ]] || ! has_online_export "$extracted"; then
     rm -f "$extracted"
     return 1
   fi
+
   LIB="$extracted"
   LIB_SOURCE="current_yi_apk"
   return 0
 }
 
-for tool in "$CC" "$QEMU" readelf file unzip "$PYTHON"; do
+try_apk_tree() {
+  local root="$1"
+  [[ -d "$root" ]] || return 1
+
+  # Search ordinary user work locations only. Every APK candidate is validated
+  # by extracting libPPPP_API.so and checking the required export, so unrelated
+  # APKs are harmless and are never executed.
+  while IFS= read -r -d '' apk; do
+    if extract_online_library_from_apk "$apk"; then
+      return 0
+    fi
+  done < <(find "$root" -maxdepth 7 -type f -iname '*.apk' -print0 2>/dev/null)
+
+  return 1
+}
+
+for tool in "$CC" "$QEMU" readelf file unzip find "$PYTHON"; do
   if ! command -v "$tool" >/dev/null 2>&1 && [[ ! -x "$tool" ]]; then
     fail "required tool missing: $tool"
   fi
@@ -96,9 +117,18 @@ else
       fi
     done
   fi
+
+  if [[ -z "$LIB" ]]; then
+    for search_root in "$HOME/Documents" "$HOME/Downloads" "$HOME/Desktop"; do
+      if try_apk_tree "$search_root"; then
+        LIB_SOURCE="discovered_current_yi_apk"
+        break
+      fi
+    done
+  fi
 fi
 
-[[ -n "$LIB" ]] || fail "no PPPP library exporting PPPP_CheckDevOnline was found; set YI_APK to the current YI Home APK"
+[[ -n "$LIB" ]] || fail "no APK/library exporting PPPP_CheckDevOnline was found under Documents/Downloads/Desktop; set YI_APK explicitly if the YI Home APK is stored elsewhere"
 
 for f in \
   "$RUNTIME/system/bin/linker64" \
