@@ -39,7 +39,7 @@ rm -f "$CONFIG" "$LOG" "$API_SNAPSHOT" "$PRE_AV_LOG" "$POST_AV_LOG"
 
 for port in "$API_PORT" "$RTSP_PORT"; do
     if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
-        echo "ERROR: isolated Phase 3I port already in use: $port" >&2
+        echo "ERROR: isolated Phase 3I port is already in use: $port" >&2
         exit 4
     fi
 done
@@ -63,12 +63,12 @@ preload:
 EOF
 chmod 600 "$CONFIG"
 
-echo "=== PHASE 3I: ISOLATED NATIVE A/V RECONNECT + STABILITY ==="
+echo "=== PHASE 3I: GENERATION-AWARE NATIVE A/V RECONNECT + STABILITY ==="
 echo "production_go2rtc_service_touched=false"
 echo "stream=${STREAM}"
 echo "source=phoneless_native_PPPP_TNP"
 echo "preload=video&audio"
-echo "test=packet_growth + AV_decode + graceful_source_restart + go2rtc_reconnect + AV_decode"
+echo "counter_validation=receiver_id_generation_aware"
 
 "$GO2RTC" -config "$CONFIG" >"$LOG" 2>&1 &
 GO2RTC_PID=$!
@@ -133,25 +133,29 @@ wait_source() {
     return 1
 }
 
-packet_counts() {
+# Output: VIDEO_RECEIVER_ID VIDEO_PACKETS AUDIO_RECEIVER_ID AUDIO_PACKETS
+receiver_state() {
     curl -sS --max-time 1 -o "$API_SNAPSHOT" "$API_URL" || true
     "$PYTHON" - "$API_SNAPSHOT" <<'PY'
 import json, sys
 try:
     obj=json.load(open(sys.argv[1],encoding='utf-8'))
 except Exception:
-    print('0 0')
+    print('0 0 0 0')
     raise SystemExit(0)
-v=a=0
+v_id=v_n=a_id=a_n=0
 for p in obj.get('producers',[]) or []:
     if p.get('format_name')!='mpegts':
         continue
     for r in p.get('receivers',[]) or []:
-        c=(r.get('codec') or {}).get('codec_name')
-        n=int(r.get('packets',0) or 0)
-        if c=='h264': v=max(v,n)
-        elif c=='aac': a=max(a,n)
-print(v,a)
+        codec=(r.get('codec') or {}).get('codec_name')
+        rid=int(r.get('id',0) or 0)
+        packets=int(r.get('packets',0) or 0)
+        if codec=='h264':
+            v_id, v_n = rid, packets
+        elif codec=='aac':
+            a_id, a_n = rid, packets
+print(v_id, v_n, a_id, a_n)
 PY
 }
 
@@ -180,16 +184,37 @@ av_decode() {
     return 1
 }
 
+wait_for_log_count() {
+    local pattern="$1" wanted="$2" label="$3" limit="$4"
+    for second in $(seq 1 "$limit"); do
+        local count
+        count="$(grep -c "$pattern" "$LOG" || true)"
+        if (( count >= wanted )); then
+            echo "${label}=PASS"
+            return 0
+        fi
+        if (( second % 5 == 0 )); then
+            echo "${label}_wait_seconds=${second}"
+        fi
+        sleep 1
+    done
+    echo "${label}=FAIL" >&2
+    tail -n 180 "$LOG" >&2 || true
+    return 1
+}
+
 wait_source "initial_source_ready" 35
 
-read -r PRE_V0 PRE_A0 < <(packet_counts)
+read -r PRE_VID PRE_V0 PRE_AID PRE_A0 < <(receiver_state)
+echo "pre_generation_video_receiver_id=${PRE_VID}"
+echo "pre_generation_audio_receiver_id=${PRE_AID}"
 echo "pre_growth_start_video_packets=${PRE_V0}"
 echo "pre_growth_start_audio_packets=${PRE_A0}"
-sleep 15
-read -r PRE_V1 PRE_A1 < <(packet_counts)
+sleep 12
+read -r PRE_VID1 PRE_V1 PRE_AID1 PRE_A1 < <(receiver_state)
 echo "pre_growth_end_video_packets=${PRE_V1}"
 echo "pre_growth_end_audio_packets=${PRE_A1}"
-if (( PRE_V1 <= PRE_V0 || PRE_A1 <= PRE_A0 )); then
+if [[ "$PRE_VID1" != "$PRE_VID" || "$PRE_AID1" != "$PRE_AID" ]] || (( PRE_V1 <= PRE_V0 || PRE_A1 <= PRE_A0 )); then
     echo "pre_reconnect_packet_growth=FAIL" >&2
     exit 9
 fi
@@ -204,6 +229,7 @@ if [[ -z "$OLD_RELAY_PID" ]]; then
     exit 10
 fi
 echo "relay_process_discovery=PASS"
+echo "old_relay_pid_detected=true"
 echo "relay_restart_signal=SIGINT"
 kill -INT "$OLD_RELAY_PID"
 
@@ -224,44 +250,84 @@ echo "old_relay_graceful_exit=PASS"
 NEW_RELAY_PID=""
 for second in $(seq 1 45); do
     candidate="$(relay_pid)"
-    if [[ -n "$candidate" && "$candidate" != "$OLD_RELAY_PID" ]] && source_ready; then
+    if [[ -n "$candidate" && "$candidate" != "$OLD_RELAY_PID" ]]; then
         NEW_RELAY_PID="$candidate"
-        echo "go2rtc_source_reconnect=PASS"
+        echo "replacement_relay_process=PASS"
         break
     fi
     if (( second % 5 == 0 )); then
-        echo "reconnect_wait_seconds=${second}"
-        tail -n 12 "$LOG" | sed 's/^/[go2rtc-tail] /'
+        echo "replacement_relay_wait_seconds=${second}"
+        tail -n 10 "$LOG" | sed 's/^/[go2rtc-tail] /'
     fi
     sleep 1
 done
 if [[ -z "$NEW_RELAY_PID" ]]; then
-    echo "go2rtc_source_reconnect=FAIL" >&2
+    echo "replacement_relay_process=FAIL" >&2
     tail -n 220 "$LOG" >&2 || true
     exit 12
 fi
 
-# Give the replacement producer time to accumulate enough fresh media before
-# validating both tracks again.
-sleep 5
-read -r POST_V0 POST_A0 < <(packet_counts)
-echo "post_reconnect_initial_video_packets=${POST_V0}"
-echo "post_reconnect_initial_audio_packets=${POST_A0}"
-if (( POST_V0 < 5 || POST_A0 < 5 )); then
-    echo "post_reconnect_media_resume=FAIL" >&2
+# Do not use producer packet counters until the replacement PPPP/TNP session is
+# authenticated. go2rtc keeps the old receiver nodes visible while reconnect()
+# is preparing the replacement and then swaps in fresh Receiver objects. Their
+# counters restart from zero, so comparing across that swap is a false failure.
+wait_for_log_count 'phase3g_tnp_auth=PASS' 2 "second_native_session_authenticated" 35
+wait_for_log_count 'PPPP_DeInitialize_rc_hex=0x00000000' 1 "first_session_clean_native_shutdown" 20
+
+# Wait until go2rtc has actually swapped receiver generations. The new receiver
+# IDs are the boundary that makes packet counters comparable again.
+GENERATION_CHANGED=0
+for second in $(seq 1 35); do
+    read -r POST_VID POST_V0 POST_AID POST_A0 < <(receiver_state)
+    if (( POST_VID > 0 && POST_AID > 0 && POST_V0 >= 5 && POST_A0 >= 5 )) \
+       && [[ "$POST_VID" != "$PRE_VID" && "$POST_AID" != "$PRE_AID" ]]; then
+        GENERATION_CHANGED=1
+        echo "go2rtc_receiver_generation_swap=PASS"
+        echo "post_generation_video_receiver_id=${POST_VID}"
+        echo "post_generation_audio_receiver_id=${POST_AID}"
+        echo "post_reconnect_initial_video_packets=${POST_V0}"
+        echo "post_reconnect_initial_audio_packets=${POST_A0}"
+        break
+    fi
+    if (( second % 5 == 0 )); then
+        echo "receiver_generation_swap_wait_seconds=${second}"
+    fi
+    sleep 1
+done
+if [[ "$GENERATION_CHANGED" != 1 ]]; then
+    echo "go2rtc_receiver_generation_swap=FAIL" >&2
+    tail -n 220 "$LOG" >&2 || true
     exit 13
 fi
+
+echo "go2rtc_source_reconnect=PASS"
 echo "post_reconnect_media_resume=PASS"
+
+# Prove growth inside one receiver generation before and after an A/V consumer.
+sleep 5
+read -r POST_VID_A POST_VA POST_AID_A POST_AA < <(receiver_state)
+if [[ "$POST_VID_A" != "$POST_VID" || "$POST_AID_A" != "$POST_AID" ]] || (( POST_VA <= POST_V0 || POST_AA <= POST_A0 )); then
+    echo "post_reconnect_settle_growth=FAIL" >&2
+    exit 14
+fi
+echo "post_reconnect_settle_growth=PASS"
 
 av_decode "post_reconnect_av_decode" "$POST_AV_LOG"
 
-sleep 20
-read -r POST_V1 POST_A1 < <(packet_counts)
-echo "post_growth_end_video_packets=${POST_V1}"
-echo "post_growth_end_audio_packets=${POST_A1}"
-if (( POST_V1 <= POST_V0 || POST_A1 <= POST_A0 )); then
+read -r GROW_VID0 GROW_V0 GROW_AID0 GROW_A0 < <(receiver_state)
+echo "post_growth_baseline_video_packets=${GROW_V0}"
+echo "post_growth_baseline_audio_packets=${GROW_A0}"
+sleep 15
+read -r GROW_VID1 GROW_V1 GROW_AID1 GROW_A1 < <(receiver_state)
+echo "post_growth_end_video_packets=${GROW_V1}"
+echo "post_growth_end_audio_packets=${GROW_A1}"
+if [[ "$GROW_VID1" != "$GROW_VID0" || "$GROW_AID1" != "$GROW_AID0" ]]; then
+    echo "post_reconnect_packet_growth=FAIL_RECEIVER_GENERATION_CHANGED_AGAIN" >&2
+    exit 15
+fi
+if (( GROW_V1 <= GROW_V0 || GROW_A1 <= GROW_A0 )); then
     echo "post_reconnect_packet_growth=FAIL" >&2
-    exit 14
+    exit 16
 fi
 echo "post_reconnect_packet_growth=PASS"
 
@@ -271,13 +337,13 @@ echo "tnp_auth_pass_count=${AUTH_COUNT}"
 echo "pppp_deinitialize_success_count=${DEINIT_COUNT}"
 if (( AUTH_COUNT < 2 )); then
     echo "two_native_sessions_authenticated=FAIL" >&2
-    exit 15
+    exit 17
 fi
 echo "two_native_sessions_authenticated=PASS"
 if (( DEINIT_COUNT < 1 )); then
     echo "first_session_clean_native_shutdown=FAIL" >&2
-    exit 16
+    exit 18
 fi
-echo "first_session_clean_native_shutdown=PASS"
 
+echo "first_session_clean_native_shutdown=PASS"
 echo "PHASE3I_STABILITY=PASS"
