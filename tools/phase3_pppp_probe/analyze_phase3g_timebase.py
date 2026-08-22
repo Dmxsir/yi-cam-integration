@@ -46,7 +46,7 @@ def media_meta(raw: bytes, expected_io_type: int) -> dict[str, int]:
     }
 
 
-def signed_delta32(current: int, previous: int) -> int:
+def delta32(current: int, previous: int) -> int:
     return (current - previous) & 0xFFFFFFFF
 
 
@@ -55,7 +55,7 @@ def summarize(name: str, items: list[dict[str, int]]) -> None:
         raise RuntimeError(f"no records for {name}")
     seq_deltas = [((b["sequence"] - a["sequence"]) & 0xFFFF) for a, b in zip(items, items[1:])]
     sec_deltas = [b["timestamp_s"] - a["timestamp_s"] for a, b in zip(items, items[1:])]
-    sub_deltas = [signed_delta32(b["timestamp_sub"], a["timestamp_sub"]) for a, b in zip(items, items[1:])]
+    sub_deltas = [delta32(b["timestamp_sub"], a["timestamp_sub"]) for a, b in zip(items, items[1:])]
 
     print(f"{name}_records={len(items)}")
     print(f"{name}_codec_id={items[0]['codec']}")
@@ -110,7 +110,10 @@ def main() -> int:
 
     audio = [media_meta(raw, 2) for raw in audio_raw]
     video = [media_meta(raw, 1) for raw in iframe_raw + pframe_raw]
-    video.sort(key=lambda item: ((item["sequence"] - video[0]["sequence"]) & 0xFFFF) if video else 0)
+    if not video:
+        raise RuntimeError("no video records")
+    video_base = video[0]["sequence"]
+    video.sort(key=lambda item: (item["sequence"] - video_base) & 0xFFFF)
 
     print("phase3g_timebase=START")
     print("source=existing_phase3f_capture")
