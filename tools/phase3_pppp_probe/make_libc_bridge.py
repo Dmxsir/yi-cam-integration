@@ -63,7 +63,13 @@ def write_resolver(path: Path, symbols: list[str]) -> None:
     ]
     for symbol in symbols:
         ident = c_ident(symbol)
-        lines.append(f"void *yi_real_{ident};")
+        # The AArch64 trampolines address these slots directly with ADRP/LO12.
+        # Mark them hidden so the linker knows they cannot be interposed by a
+        # different DSO and can therefore use local position-independent
+        # relocations in a shared object.
+        lines.append(
+            f'__attribute__((visibility("hidden"))) void *yi_real_{ident};'
+        )
 
     lines += [
         "",
@@ -89,6 +95,10 @@ def write_trampolines(path: Path, symbols: list[str]) -> None:
         wrapper = f"yi_wrap_{ident}"
         slot = f"yi_real_{ident}"
         lines += [
+            # Match the hidden visibility declared by the resolver object. It
+            # prevents R_AARCH64_ADR_PREL_PG_HI21 from being rejected as an
+            # interposable-symbol relocation when linking libc.so.
+            f".hidden {slot}",
             f".global {wrapper}",
             f".type {wrapper}, %function",
             f"{wrapper}:",
