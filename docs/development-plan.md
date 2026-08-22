@@ -26,9 +26,9 @@ Completed:
 - Phase 6C.2: per-camera runtime lifecycle manager and descendant cleanup proof.
 - Phase 6C.3: HTTP runtime control API for start/stop/restart.
 - Phase 6C.4: HTTP live reprobe, H264/AAC capability refresh, runtime resume and cleanup proof.
-- Phase 6C.5A: isolated App-owned managed go2rtc publication, media-ready producer detection, RTSP and per-camera restart proof.
+- Phase 6C.5: App-owned managed go2rtc publication, two-camera operation and fault-isolated recovery.
 
-Active work starts at **Phase 6C.5B — two-camera media publication + fault isolation**.
+Active work starts at **Phase 6C.6 — backend persistence and startup policy**.
 
 ---
 
@@ -115,11 +115,9 @@ Live PTZ exit-gate proof (2026-08-23):
 - Stop, graceful shutdown and probe cleanup passed.
 - `PHASE6C_REPROBE_SMOKE=PASS`.
 
-### Phase 6C.5 — App-owned media publication — ACTIVE
+### Phase 6C.5 — App-owned media publication — COMPLETE
 
-Goal: remove all dependency on user-maintained development go2rtc stream definitions while preserving backend ownership of PPPP/TNP lifecycle.
-
-Architecture locked:
+Architecture:
 
 ```text
 per-camera Lifecycle Manager
@@ -136,24 +134,16 @@ shared App-managed go2rtc
         +--> optional Frigate
 ```
 
-Why incoming MPEG-TS is used:
-
-- go2rtc supports incoming MPEG-TS through `/api/stream.ts?dst=...`.
-- An incoming producer is not created/owned by go2rtc; the external App controls when it starts/stops.
-- This preserves Phase 6C.2 lifecycle ownership and self-healing semantics.
-- go2rtc remains one shared long-lived publisher and is not restarted for an individual camera restart.
-
 Implemented reusable backend pieces:
 
 - `yi_stream_identity.py` — immutable media stream names derived only from `stable_id`.
 - `yi_media_publisher.py` — managed shared go2rtc process and generated empty-stream configuration.
-- Lifecycle manager pushes supervised MPEG-TS directly to the managed publisher using chunked HTTP streaming.
+- Lifecycle manager pushes supervised MPEG-TS directly to managed go2rtc using chunked HTTP streaming.
 - Backend exposes secret-safe publication metadata alongside camera/runtime state.
-- Publisher readiness distinguishes a merely registered MPEG-TS producer from a producer whose `medias` were actually detected by go2rtc.
-- Lifecycle publisher prebuffers the first MPEG-TS chunk before opening incoming HTTP ingest so go2rtc's five-second MPEG-TS probe window is spent on real transport data rather than PPPP/TNP startup.
-- Service accepts explicit managed-go2rtc binary/API/RTSP settings while keeping publisher disabled for older development smoke tests unless requested.
+- Publisher readiness distinguishes a registered producer from one with actual detected media.
+- First MPEG-TS data is prebuffered before incoming HTTP ingest so go2rtc's probe window is used for transport data rather than PPPP/TNP startup.
 
-Stable media identity:
+Stable identity example:
 
 ```text
 stable_id:   e2f22804fecdbd8c3561
@@ -161,70 +151,117 @@ stream:      yi_e2f22804fecd
 RTSP path:   /yi_e2f22804fecd
 ```
 
-Display-name changes therefore never change media URLs or Home Assistant identity.
-
 #### Phase 6C.5A — isolated publisher proof — COMPLETE
 
-Live PTZ exit-gate proof (2026-08-23):
+Live PTZ proof (2026-08-23):
 
-- Separate backend and managed go2rtc ran on isolated development ports.
-- Generated publisher contained all 7 discovered camera destination streams.
-- Production go2rtc ports `1984/8554` remained untouched.
+- Separate backend and managed go2rtc ran on isolated ports.
+- Generated publisher contained all 7 camera destinations.
+- Production ports `1984/8554` remained untouched.
 - HTTP camera start attached lifecycle MPEG-TS ingest.
-- go2rtc reported a registered **and media-ready** MPEG-TS producer.
+- Producer became registered and media-ready.
 - RTSP validated H264 1920x1080 + AAC 16000 Hz mono.
 - HTTP restart changed camera runtime PID from `10651` to `10737`.
-- Shared go2rtc PID survived the camera restart unchanged.
-- The MPEG-TS producer re-registered media-ready after restart.
-- RTSP recovered with H264 + AAC.
-- Camera stop, service shutdown and managed-go2rtc cleanup passed.
+- Shared go2rtc PID did not change.
+- Producer re-registered media-ready and RTSP recovered.
 - `PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS`.
 
-Exit gate: PASS.
+#### Phase 6C.5B — two-camera + fault isolation — COMPLETE
 
-#### Phase 6C.5B — two-camera + fault isolation — ACTIVE
+Live PTZ + pool proof (2026-08-23):
 
-Validation design:
+- Isolated backend/go2rtc ports were `18103/11985/18555`; production remained untouched.
+- PTZ `e2f22804fecdbd8c3561` and pool `867ecdee5a3692c669f9` started concurrently.
+- Both publications became media-ready and both RTSP endpoints validated H264 + AAC.
+- Fault injection froze only the PTZ relay process group (`PGID 11282`).
+- Pool RTSP remained valid during the PTZ fault.
+- PTZ runtime PID changed `11272` → `11588`; generation changed `1` → `2`.
+- Pool runtime PID/generation stayed unchanged.
+- Shared go2rtc PID stayed unchanged.
+- Faulted descendants were cleaned.
+- Both RTSP endpoints validated H264 + AAC after recovery.
+- Both runtimes stopped cleanly and publisher cleanup passed.
+- `PHASE6C_MEDIA_ISOLATION_SMOKE=PASS`.
 
-- Start a separate backend + managed go2rtc on non-production ports.
-- Start two discovered cameras through backend HTTP.
-- Require both publications to become media-ready and validate H264 + AAC over RTSP.
-- Record both lifecycle PID/generation values and the shared go2rtc PID.
-- Locate the fault-target QEMU only by walking descendants of that camera's lifecycle PID; never use an unscoped global QEMU match.
-- Freeze only that descendant QEMU so the existing media-stall supervisor detects silence and recreates that camera session.
-- During the fault/recovery window, verify the second camera PID/generation and RTSP remain unchanged/valid.
-- Verify the shared go2rtc PID remains unchanged.
-- After recovery, require the faulted camera PID/generation to change and its producer to become media-ready again.
-- Validate H264 + AAC on both RTSP endpoints after recovery.
-- Stop both cameras and prove managed publisher cleanup at service shutdown.
+Exit gate: PASS. Phase 6C.5 is complete.
 
-6C.5B exit gate:
+### Phase 6C.6 — Backend persistence and startup policy — ACTIVE
 
-- Two App-managed streams operate concurrently.
-- Fault injection is scoped to one selected camera runtime.
-- Only the selected camera lifecycle generation/PID changes.
-- Shared publisher PID and second camera runtime remain unchanged.
-- Second RTSP remains valid during the selected-camera failure/recovery.
-- Both RTSP endpoints validate H264 + AAC after recovery.
-- No production configuration or production go2rtc ports are modified.
+Goal: make the backend restart-safe before packaging it as a Home Assistant App.
 
-Only after this passes is Phase 6C.5 complete.
+Policy decision:
 
-### Phase 6C.6 — Backend persistence and startup policy — NEXT
+- Runtime startup is **explicit-intent based**, not "start every discovered camera".
+- `start` and `restart` persist `desired_running=true` for that immutable `stable_id`.
+- `stop` removes persisted running intent.
+- Newly discovered cameras default to stopped until the Integration/user requests start.
+- Reprobe temporary stop/resume does not alter persisted intent.
 
-Requirements:
+Persistence layout when `yi_addon_service.py --data-dir <path>` is enabled:
 
-- Persist non-secret runtime preferences and capability cache under App `/data`.
-- Decide/implement automatic startup policy for discovered cameras.
-- Restore intended runtime state after App restart.
-- Safe behavior when YI cloud is temporarily unavailable at boot.
-- Structured diagnostics for lifecycle/publication failures.
+```text
+<data-dir>/capabilities.json
+<data-dir>/runtime-policy.json
+<data-dir>/runtime/
+<data-dir>/publisher/
+```
+
+The Home Assistant App will later use `--data-dir /data`.
+
+Implemented so far:
+
+- `yi_runtime_policy.py`
+  - schema-versioned secret-safe runtime intent.
+  - stores only `stable_id` values that should run.
+  - atomic fsync + replace writes.
+  - file mode 0600 and parent mode 0700 where supported.
+- `yi_persistent_backend.py`
+  - persistence adapter around the already-proven `YiAddonBackend`.
+  - runtime intent is persisted before start/stop/restart control is applied.
+  - successful discovery reconciles persisted intent against current camera inventory.
+  - unavailable/missing intended cameras remain pending rather than being deleted.
+  - health exposes desired count, pending restore count, last reconcile time/counts and safe policy errors.
+  - camera/status responses expose `persisted_desired_running`.
+- `yi_addon_service.py`
+  - new `--data-dir` option.
+  - explicit per-feature paths still take precedence where applicable.
+  - no `--data-dir` keeps legacy non-persistent smoke behavior unchanged.
+  - initial discovery failure no longer risks losing intent.
+  - automatic bounded-interval initial-discovery retry is enabled by `--discovery-retry-interval` (default 30s) until the first successful discovery.
+- Regression tests:
+  - persistence round-trip and mode 0600.
+  - unavailable intended camera remains pending.
+  - simulated cloud discovery failure leaves persisted intent pending.
+- Live validation adapter:
+  - `tools/phase3_pppp_probe/run_phase6c_persistence_smoke.sh`.
+
+Live 6C.6 exit-gate design:
+
+1. Start isolated backend/go2rtc with a temporary persistent data directory.
+2. Start PTZ + pool and validate both RTSP streams.
+3. Run a real live reprobe so `capabilities.json` is proven under the data directory while runtime intent remains unchanged.
+4. Shut down the whole service **without** stopping either camera through the API.
+5. Restart with the same data directory and require both cameras to restore automatically and both RTSP streams to return.
+6. Explicitly stop pool and verify policy now contains only PTZ.
+7. Shut down and restart a third time.
+8. Require PTZ to restore automatically while pool remains persistently stopped.
+9. Verify secret-safe mode-0600 state and final service/publisher cleanup.
+
+Cloud-outage boot behavior:
+
+- Initial discovery exceptions keep the HTTP service alive.
+- Persisted desired IDs remain pending.
+- A background retry loop repeats initial discovery at the configured interval.
+- The first later successful discovery runs the same reconcile path and restores intended cameras.
+- Regression coverage proves a discovery transport failure does not clear pending intent.
 
 Exit gate:
 
-- Backend restart restores camera inventory/runtime policy without manual configuration.
+- `PHASE6C_PERSISTENCE_SMOKE=PASS` from the live restart sequence.
+- Persistence regression tests pass.
+- No production go2rtc/systemd configuration is modified.
 
-Phase 6C is complete only after 6C.1–6C.6 pass.
+Phase 6C is complete only after 6C.6 passes.
 
 ---
 
@@ -274,26 +311,26 @@ Exit gate:
 
 ## Phase 6E — Home Assistant Custom Integration
 
-### 6E.1 Config Flow
+### Phase 6E.1 — Config Flow
 
 - Consume Supervisor/App discovery through `async_step_hassio`.
 - Validate backend API version and health.
 - Guide account setup without exposing PPPP/TNP internals.
 
-### 6E.2 Device Registry
+### Phase 6E.2 — Device Registry
 
 - One HA Device per camera.
 - Unique identity based on `stable_id`.
 - Camera rename does not create a new device.
 
-### 6E.3 Entities
+### Phase 6E.3 — Entities
 
 - `camera` entity.
 - runtime/connectivity status.
 - cloud-online state.
 - restart/reprobe controls where useful.
 
-### 6E.4 Diagnostics
+### Phase 6E.4 — Diagnostics
 
 - App/API version.
 - Safe camera metadata.
