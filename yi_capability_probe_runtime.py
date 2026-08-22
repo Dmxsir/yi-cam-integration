@@ -8,8 +8,8 @@ ffprobe, and only then atomically updates the capability cache.
 A failed probe never overwrites a previously proven capability record.
 Transient PPPP session handoff failures are retried in a bounded way because a
 reprobe may follow immediately after stopping an existing camera runtime.
-Every relay attempt owns a dedicated process group so timeout cleanup cannot
-leave relay/QEMU/FFmpeg descendants behind.
+Every relay attempt owns a dedicated process group so timeout or Add-on shutdown
+cannot leave relay/QEMU/FFmpeg descendants behind.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,7 +115,7 @@ def _validated_media(probe_json: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class YiCapabilityProbe:
-    """Run one bounded secret-safe capability proof for a stable_id."""
+    """Run bounded secret-safe capability proofs and own their child processes."""
 
     def __init__(
         self,
@@ -145,6 +146,9 @@ class YiCapabilityProbe:
         self.session_settle_seconds = float(session_settle_seconds)
         self.retry_delay_seconds = float(retry_delay_seconds)
         self.terminate_grace_seconds = float(terminate_grace_seconds)
+        self._active_lock = threading.RLock()
+        self._active: dict[int, subprocess.Popen[bytes]] = {}
+        self._shutdown = threading.Event()
 
     @property
     def attempt_timeout_seconds(self) -> float:
@@ -206,6 +210,29 @@ class YiCapabilityProbe:
         except subprocess.TimeoutExpired:
             pass
 
+    def _register(self, process: subprocess.Popen[bytes]) -> None:
+        with self._active_lock:
+            if self._shutdown.is_set():
+                self._terminate_group(process)
+                raise CapabilityProbeError(
+                    "probe_cancelled",
+                    "The live capability probe was cancelled because the Add-on is shutting down.",
+                )
+            self._active[process.pid] = process
+
+    def _unregister(self, process: subprocess.Popen[bytes]) -> None:
+        with self._active_lock:
+            self._active.pop(process.pid, None)
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        if self._shutdown.wait(seconds):
+            raise CapabilityProbeError(
+                "probe_cancelled",
+                "The live capability probe was cancelled because the Add-on is shutting down.",
+            )
+
     def _run_relay_attempt(
         self,
         key: str,
@@ -233,22 +260,33 @@ class YiCapabilityProbe:
                 "The live camera capability probe could not be started.",
             ) from exc
 
+        self._register(process)
         try:
-            returncode = process.wait(timeout=self.attempt_timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_group(process)
-            raise CapabilityProbeError(
-                "probe_timeout",
-                "The live camera capability probe timed out.",
-            ) from exc
+            try:
+                returncode = process.wait(timeout=self.attempt_timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_group(process)
+                raise CapabilityProbeError(
+                    "probe_timeout",
+                    "The live camera capability probe timed out.",
+                ) from exc
 
-        if returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
-            raise CapabilityProbeError(
-                "probe_runtime_failed",
-                "The camera did not produce valid media during the capability probe.",
-            )
+            if returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
+                raise CapabilityProbeError(
+                    "probe_runtime_failed",
+                    "The camera did not produce valid media during the capability probe.",
+                )
+        finally:
+            if process.poll() is None:
+                self._terminate_group(process)
+            self._unregister(process)
 
     def probe(self, stable_id: str, *, session_handoff: bool = False) -> CapabilityProbeResult:
+        if self._shutdown.is_set():
+            raise CapabilityProbeError(
+                "probe_cancelled",
+                "The live capability probe is unavailable because the Add-on is shutting down.",
+            )
         key = _stable_id(stable_id)
         probe_dir = self.config.state_dir / "probes"
         probe_dir.mkdir(parents=True, exist_ok=True)
@@ -258,8 +296,8 @@ class YiCapabilityProbe:
             pass
         last_log = probe_dir / f"{key}-last.log"
 
-        if session_handoff and self.session_settle_seconds > 0:
-            time.sleep(self.session_settle_seconds)
+        if session_handoff:
+            self._sleep_interruptible(self.session_settle_seconds)
 
         with tempfile.TemporaryDirectory(prefix=f"yi-probe-{key[:8]}-", dir=probe_dir) as temporary:
             work = Path(temporary)
@@ -289,8 +327,7 @@ class YiCapabilityProbe:
                         retryable = exc.category in {"probe_runtime_failed", "probe_timeout"}
                         if attempt >= self.attempts or not retryable:
                             raise
-                        if self.retry_delay_seconds > 0:
-                            time.sleep(self.retry_delay_seconds)
+                        self._sleep_interruptible(self.retry_delay_seconds)
 
             if last_error is not None:
                 raise last_error
@@ -345,3 +382,10 @@ class YiCapabilityProbe:
                 duration_seconds=self.duration_seconds,
                 attempts_used=attempts_used,
             )
+
+    def shutdown(self) -> None:
+        self._shutdown.set()
+        with self._active_lock:
+            processes = list(self._active.values())
+        for process in processes:
+            self._terminate_group(process)
