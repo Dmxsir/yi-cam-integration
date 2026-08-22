@@ -48,6 +48,13 @@ pull_first "$RUNTIME/system/lib64/libdl.so" \
     /apex/com.android.runtime/lib64/bionic/libdl.so \
     /system/lib64/libdl.so
 
+# Modern Bionic libc/libdl reference loader-private exports such as
+# __loader_shared_globals through the ld-android.so support DSO. GNU ld also
+# needs this file present while we build the tiny Android-targeted probe.
+pull_first "$RUNTIME/system/lib64/ld-android.so" \
+    /apex/com.android.runtime/lib64/ld-android.so \
+    /system/lib64/ld-android.so
+
 chmod +x "$RUNTIME/system/bin/linker64"
 
 echo
@@ -55,6 +62,13 @@ echo "--- RUNTIME FILES ---"
 file "$RUNTIME/system/bin/linker64"
 file "$RUNTIME/system/lib64/libc.so"
 file "$RUNTIME/system/lib64/libdl.so"
+file "$RUNTIME/system/lib64/ld-android.so"
+
+echo
+echo "--- LOADER SUPPORT EXPORT ---"
+readelf -Ws "$RUNTIME/system/lib64/ld-android.so" \
+    | grep -E '__loader_shared_globals|__loader_dlopen|__loader_dlsym' \
+    | head -20 || true
 
 echo
 echo "BIONIC_BOOTSTRAP=PASS"
