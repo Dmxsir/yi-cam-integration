@@ -3,9 +3,9 @@
 
 The proven relay remains responsible for PPPP/TNP and MPEG-TS generation. This
 wrapper only forwards its stdout to go2rtc and watches for forward progress. If
-the child stops producing bytes after startup, the wrapper terminates the child
-and exits non-zero so a persistent go2rtc preload consumer can recreate a fresh
-producer/session.
+the child stops producing bytes after startup, the wrapper terminates the full
+relay process group and exits non-zero so a persistent go2rtc preload consumer
+can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
 """
 
 from __future__ import annotations
@@ -37,22 +37,35 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def signal_child_group(child: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    """Signal the relay and every descendant in its dedicated process group."""
+    try:
+        os.killpg(child.pid, sig)
+        return
+    except ProcessLookupError:
+        return
+    except (PermissionError, OSError):
+        # Defensive fallback. With start_new_session=True the child PID is the
+        # process-group ID, so killpg is the normal path.
+        if child.poll() is None:
+            try:
+                child.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
+
 def terminate_child(child: subprocess.Popen[bytes], grace: float) -> None:
     if child.poll() is not None:
         return
-    try:
-        child.send_signal(signal.SIGTERM)
-    except ProcessLookupError:
-        return
+    log("terminate_scope=process_group; signal=SIGTERM")
+    signal_child_group(child, signal.SIGTERM)
     try:
         child.wait(timeout=max(0.1, grace))
         return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        child.kill()
-    except ProcessLookupError:
-        return
+    log("terminate_scope=process_group; signal=SIGKILL")
+    signal_child_group(child, signal.SIGKILL)
     try:
         child.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
