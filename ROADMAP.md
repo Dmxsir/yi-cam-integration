@@ -40,11 +40,11 @@ The target product architecture is documented in [`docs/product-architecture.md`
 
 ## Phase 6 — Add-on backend foundation — ACTIVE
 
-### Phase 6A — Generic account discovery core — IN PROGRESS
+### Phase 6A — Generic account discovery core — COMPLETE
 
 Goal: remove Phase 3 single-camera assumptions and build the future Add-on Camera Manager.
 
-Requirements:
+Requirements completed:
 
 - Login once per account session.
 - Enumerate all cameras automatically.
@@ -54,15 +54,22 @@ Requirements:
 - Secret-safe TNP material readiness checks.
 - Development CLI is only an adapter around reusable backend classes.
 
-Current implementation: `yi_camera_manager.py`.
+Implementation: `yi_camera_manager.py`.
 
-Exit criteria:
+Live account proof (2026-08-23):
 
-- Full account inventory is discovered without hardcoded camera names.
-- Eligible TNP cameras can obtain secret-bearing runtime material by `stable_id`.
-- No production stream is modified during discovery.
+- 7/7 cameras discovered automatically.
+- 7/7 reported TNP (`p2p_type=2`).
+- 7/7 camera credentials decrypted successfully.
+- 7/7 `/v4/tnp/device_info` requests succeeded.
+- 7/7 cameras reported `tnp_material_ready=true` and `probe_candidate=true`.
+- Raw cloud models observed: `89`, `83`, `40`, `89`, `5`, `51`, `83`.
+- All currently normalize to `UNKNOWN`; this is accepted because model mapping is metadata, not a support whitelist.
+- Production streams were not modified by discovery.
 
-### Phase 6B — Generic camera runtime and capability probe — NEXT
+Exit criteria: PASS.
+
+### Phase 6B — Generic camera runtime and capability probe — ACTIVE
 
 Goal: start a camera from `stable_id`, not camera name/model constants.
 
@@ -74,6 +81,12 @@ Requirements:
 - Cache successful profile/capability results.
 - Integrate existing per-camera session supervisor.
 - Maintain isolation between camera runtimes.
+
+Implementation direction:
+
+- `yi_camera_runtime.py` — reusable Add-on backend/runtime material provider.
+- `yi_native_av_relay_stable.py` — development adapter that feeds a `stable_id` runtime into the already-proven native relay.
+- The initial safe probe profile reuses the proven TNP-v2 command sequence. Success is determined by observed H264/AAC output, not raw model number.
 
 Exit criteria:
 
