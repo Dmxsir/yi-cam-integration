@@ -152,6 +152,7 @@ def _send_config(
     connection: socket.socket,
     material: oracle.CameraMaterial,
     duration: int,
+    resolution: int,
 ) -> None:
     config = {
         "did": material.pppp_did,
@@ -161,7 +162,7 @@ def _send_config(
         "wakeup": material.wakeup,
         "encrypted": material.encrypted,
         "connectionFlag": 0x4B,
-        "resolution": oracle.OFFICIAL_DEFAULT_RESOLUTION,
+        "resolution": resolution,
         "startUseCount": oracle.START_USE_COUNT,
         "captureSeconds": duration,
     }
@@ -177,6 +178,7 @@ def run_relay(
     apk: Path,
     duration: int,
     sink: BinaryIO,
+    resolution: int = 1,
     reorder_pending: int = 24,
     reorder_wait: float = 0.35,
 ) -> dict[str, Any]:
@@ -213,7 +215,7 @@ def run_relay(
                 if first[:1] != b"\x01" or oracle._safe_event(first[1:], secrets).get("event") != "oracle_ready":
                     raise RuntimeError("Oracle did not complete its safe handshake")
 
-                _send_config(connection, material, duration)
+                _send_config(connection, material, duration, resolution)
                 _log(f"target={material.name}; finite live validation={duration}s")
 
                 while not oracle_finished:
@@ -306,6 +308,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--adb", type=Path, default=Path(default_adb) if default_adb else None)
     result.add_argument("--apk", type=Path, default=Path("oracle/android/build/yi-tnp-oracle.apk"))
     result.add_argument("--duration", type=int, default=60, choices=range(5, 3601))
+    result.add_argument(
+        "--resolution",
+        type=int,
+        default=1,
+        choices=range(0, 5),
+        help="YI TNP quality value; y291ga: 1 = proven 1920x1080, 2 = proven 640x360",
+    )
     result.add_argument("--reorder-pending", type=int, default=24)
     result.add_argument("--reorder-wait", type=float, default=0.35)
     output = result.add_mutually_exclusive_group(required=True)
@@ -345,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
             args.apk,
             args.duration,
             sink,
+            args.resolution,
             args.reorder_pending,
             args.reorder_wait,
         )
