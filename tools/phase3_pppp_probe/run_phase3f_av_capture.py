@@ -22,7 +22,39 @@ import yi_live_relay
 import yi_tnp_oracle as oracle
 
 AUDIO_CODEC_AAC = 138
+AAC_OBJECT_TYPE_LC = 2
 MAX_RECORD = 2 * 1024 * 1024 + 32
+
+# TNP FRAMEINFO audio flags are encoded as:
+#   flags = (samplerate_code << 2) | (databits_code << 1) | channel_code
+# The code mapping follows the protocol enum used by the camera SDK.  AAC/ADTS
+# requires the standard MPEG-4 frequencies, so the protocol's 11K/22K/44K
+# labels map to 11025/22050/44100 Hz respectively.
+TNP_SAMPLE_RATES = {
+    0: 8000,
+    1: 11025,
+    2: 16000,
+    3: 22050,
+    4: 24000,
+    5: 32000,
+    6: 44100,
+    7: 48000,
+}
+ADTS_SAMPLE_RATE_INDEX = {
+    96000: 0,
+    88200: 1,
+    64000: 2,
+    48000: 3,
+    44100: 4,
+    32000: 5,
+    24000: 6,
+    22050: 7,
+    16000: 8,
+    12000: 9,
+    11025: 10,
+    8000: 11,
+    7350: 12,
+}
 
 
 def _payload(material: oracle.CameraMaterial, units: tuple[bytes, bytes, bytes, bytes]) -> bytes:
@@ -76,10 +108,60 @@ def _video_stream(records2: list[bytes], records3: list[bytes], material: oracle
     }
 
 
-def _audio_stream(records: list[bytes]) -> tuple[bytes, dict[str, int | bool]]:
+def _decode_audio_flags(flags: int) -> dict[str, int]:
+    sample_rate_code = (flags >> 2) & 0x3F
+    databits_code = (flags >> 1) & 0x01
+    channel_code = flags & 0x01
+    sample_rate = TNP_SAMPLE_RATES.get(sample_rate_code)
+    if sample_rate is None:
+        raise RuntimeError(f"unsupported TNP audio sample-rate code {sample_rate_code}")
+    channels = 1 if channel_code == 0 else 2
+    # The protocol documents both databits code 0 and 1 as 16-bit-compatible;
+    # for compressed AAC this field describes source/sample format metadata.
+    databits = 16
+    return {
+        "flags": flags,
+        "sample_rate_code": sample_rate_code,
+        "sample_rate": sample_rate,
+        "databits_code": databits_code,
+        "databits": databits,
+        "channel_code": channel_code,
+        "channels": channels,
+    }
+
+
+def _adts_header(payload_size: int, sample_rate: int, channels: int, object_type: int = AAC_OBJECT_TYPE_LC) -> bytes:
+    if payload_size <= 0:
+        raise RuntimeError("cannot frame an empty AAC access unit")
+    frequency_index = ADTS_SAMPLE_RATE_INDEX.get(sample_rate)
+    if frequency_index is None:
+        raise RuntimeError(f"AAC ADTS has no sample-rate index for {sample_rate}")
+    if channels not in (1, 2):
+        raise RuntimeError(f"Phase 3F supports mono/stereo AAC only, got {channels} channels")
+    # ADTS 'profile' stores audioObjectType - 1.  YI's Android stack identifies
+    # this stream family as AAC LC; successful FFmpeg decoding below is the
+    # dynamic validation before this framing is accepted for the relay.
+    profile = object_type - 1
+    frame_length = payload_size + 7
+    if frame_length >= (1 << 13):
+        raise RuntimeError("AAC access unit is too large for ADTS framing")
+    return bytes((
+        0xFF,
+        0xF1,  # MPEG-4, layer 0, no CRC
+        ((profile & 0x03) << 6) | ((frequency_index & 0x0F) << 2) | ((channels >> 2) & 0x01),
+        ((channels & 0x03) << 6) | ((frame_length >> 11) & 0x03),
+        (frame_length >> 3) & 0xFF,
+        ((frame_length & 0x07) << 5) | 0x1F,
+        0xFC,
+    ))
+
+
+def _audio_stream(records: list[bytes]) -> tuple[bytes, bytes, dict[str, int | bool]]:
     payloads: list[bytes] = []
+    framed: list[bytes] = []
     first_sequence: int | None = None
     last_sequence: int | None = None
+    format_meta: dict[str, int] | None = None
     for raw in records:
         if len(raw) < 32 or raw[0] != 2 or raw[1] != 2:
             raise RuntimeError("Phase 3F received malformed TNP audio unit")
@@ -90,20 +172,39 @@ def _audio_stream(records: list[bytes]) -> tuple[bytes, dict[str, int | bool]]:
         codec = int.from_bytes(media[0:2], "big")
         if codec != AUDIO_CODEC_AAC:
             raise RuntimeError(f"Phase 3F expected AAC codec id 138, got {codec}")
+        flags = media[2]
+        decoded = _decode_audio_flags(flags)
+        if format_meta is None:
+            format_meta = decoded
+        elif decoded != format_meta:
+            raise RuntimeError("TNP audio format flags changed during one Phase 3F capture")
         sequence = int.from_bytes(media[6:8], "big")
         if first_sequence is None:
             first_sequence = sequence
         last_sequence = sequence
-        payloads.append(raw[32:])
-    elementary = b"".join(payloads)
-    if not elementary:
+        access_unit = raw[32:]
+        if not access_unit:
+            raise RuntimeError("Phase 3F received an empty AAC access unit")
+        payloads.append(access_unit)
+        framed.append(_adts_header(len(access_unit), decoded["sample_rate"], decoded["channels"]) + access_unit)
+
+    if format_meta is None or not payloads:
         raise RuntimeError("Phase 3F produced an empty AAC stream")
-    adts = len(elementary) >= 2 and elementary[0] == 0xFF and (elementary[1] & 0xF0) == 0xF0
-    return elementary, {
+    elementary = b"".join(payloads)
+    adts_stream = b"".join(framed)
+    return elementary, adts_stream, {
         "audio_frames": len(payloads),
         "first_sequence": first_sequence or 0,
         "last_sequence": last_sequence or 0,
-        "adts_sync": adts,
+        "flags": format_meta["flags"],
+        "sample_rate_code": format_meta["sample_rate_code"],
+        "sample_rate": format_meta["sample_rate"],
+        "databits_code": format_meta["databits_code"],
+        "databits": format_meta["databits"],
+        "channel_code": format_meta["channel_code"],
+        "channels": format_meta["channels"],
+        "object_type": AAC_OBJECT_TYPE_LC,
+        "adts_sync": len(adts_stream) >= 2 and adts_stream[0] == 0xFF and (adts_stream[1] & 0xF0) == 0xF0,
     }
 
 
@@ -165,8 +266,9 @@ def main() -> int:
         iframe_tnp = args.target_dir / "channel2-iframes.tnp"
         pframe_tnp = args.target_dir / "channel3-pframes.tnp"
         h264_path = args.target_dir / "warehouse.h264"
-        aac_path = args.target_dir / "warehouse.aac"
-        for path in (audio_tnp, iframe_tnp, pframe_tnp, h264_path, aac_path):
+        aac_raw_path = args.target_dir / "warehouse-raw.aac"
+        aac_adts_path = args.target_dir / "warehouse-adts.aac"
+        for path in (audio_tnp, iframe_tnp, pframe_tnp, h264_path, aac_raw_path, aac_adts_path):
             path.unlink(missing_ok=True)
 
         print("phase3f_host=START")
@@ -176,6 +278,7 @@ def main() -> int:
         print(f"cloud_online_reported={str(preflight['cloud_online_reported']).lower()}")
         print("media_channels=1:AAC,2:H264-I,3:H264-P")
         print("video_resolution_request=1")
+        print("audio_framing_source=live_TNP_FRAMEINFO_flags")
         print("phone_required=false")
         print("media_output_scope=.analysis_only")
 
@@ -211,23 +314,33 @@ def main() -> int:
         records2 = _records(iframe_tnp)
         records3 = _records(pframe_tnp)
         h264, video_meta = _video_stream(records2, records3, material)
-        aac, audio_meta = _audio_stream(records1)
+        aac_raw, aac_adts, audio_meta = _audio_stream(records1)
         h264_path.write_bytes(h264)
-        aac_path.write_bytes(aac)
+        aac_raw_path.write_bytes(aac_raw)
+        aac_adts_path.write_bytes(aac_adts)
 
         print(f"host_channel1_records={len(records1)}")
         print(f"host_channel2_records={len(records2)}")
         print(f"host_channel3_records={len(records3)}")
         print(f"h264_output_bytes={len(h264)}")
         print(f"h264_output_frames={video_meta['video_frames']}")
-        print(f"aac_output_bytes={len(aac)}")
+        print(f"aac_raw_output_bytes={len(aac_raw)}")
+        print(f"aac_output_bytes={len(aac_adts)}")
         print(f"aac_output_frames={audio_meta['audio_frames']}")
+        print(f"audio_flags={audio_meta['flags']}")
+        print(f"audio_sample_rate_code={audio_meta['sample_rate_code']}")
+        print(f"audio_sample_rate_hz={audio_meta['sample_rate']}")
+        print(f"audio_databits_code={audio_meta['databits_code']}")
+        print(f"audio_databits={audio_meta['databits']}")
+        print(f"audio_channel_code={audio_meta['channel_code']}")
+        print(f"audio_channels={audio_meta['channels']}")
+        print(f"aac_object_type_candidate={audio_meta['object_type']}")
         print(f"aac_adts_sync={str(bool(audio_meta['adts_sync'])).lower()}")
 
         video_probe = _ffprobe(h264_path, "h264")
-        audio_probe = _ffprobe(aac_path, "aac")
+        audio_probe = _ffprobe(aac_adts_path, "aac")
         video_decode = _ffmpeg_decode(h264_path, "h264")
-        audio_decode = _ffmpeg_decode(aac_path, "aac") if audio_meta["adts_sync"] else False
+        audio_decode = _ffmpeg_decode(aac_adts_path, "aac")
         if video_probe is not None:
             print(f"ffprobe_video={json.dumps(video_probe, sort_keys=True, separators=(',', ':'))}")
         if audio_probe is not None:
@@ -236,13 +349,22 @@ def main() -> int:
         print(f"ffmpeg_audio_decode={'SKIPPED' if audio_decode is None else 'PASS' if audio_decode else 'FAIL'}")
 
         video_ok = len(h264) > 0 and (video_decode is not False)
-        audio_ok = len(aac) > 0 and bool(audio_meta["adts_sync"]) and (audio_decode is not False)
+        audio_probe_ok = audio_probe is None or (
+            audio_probe.get("ok") is True
+            and str(audio_probe.get("codec_name")) == "aac"
+            and str(audio_probe.get("sample_rate")) == str(audio_meta["sample_rate"])
+            and int(audio_probe.get("channels", 0)) == int(audio_meta["channels"])
+        )
+        audio_ok = len(aac_adts) > 0 and bool(audio_meta["adts_sync"]) and audio_probe_ok and (audio_decode is not False)
         if video_ok and audio_ok:
+            print("phase3f_audio_framing=PASS")
             print("phase3f_elementary_streams=PASS")
             print("PHASE3F_AV=PASS")
             return 0
-        if not audio_meta["adts_sync"]:
-            print("audio_elementary_stream=NEEDS_FRAMING")
+
+        if not audio_ok:
+            print("phase3f_audio_framing=FAIL")
+            print("audio_next_check=payload_encryption_or_non_LC_AAC")
         print("phase3f_elementary_streams=FAIL")
         print("PHASE3F_AV=FAIL")
         return 1
