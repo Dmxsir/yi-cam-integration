@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import BinaryIO
 
 import yi_native_av_relay as base
@@ -188,5 +189,29 @@ def _start_ffmpeg_with_explicit_stdout(
 
 base.start_ffmpeg = _start_ffmpeg_with_explicit_stdout
 
+
+def _write_exit_marker(rc: int) -> None:
+    """Optional test-only marker written after base.main() has fully returned.
+
+    The marker contains no camera/account material. It lets an external harness
+    prove that the relay completed its own native-worker and mux shutdown even
+    after the parent go2rtc process has already stopped collecting stderr.
+    """
+    raw = os.getenv("YI_PHASE3_EXIT_MARKER", "").strip()
+    if not raw:
+        return
+    path = Path(raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"relay_exit_rc={rc}\n", encoding="utf-8")
+
+
 if __name__ == "__main__":
-    raise SystemExit(base.main())
+    exit_rc = 1
+    try:
+        exit_rc = base.main()
+    finally:
+        try:
+            _write_exit_marker(exit_rc)
+        except Exception as exc:
+            base.log(f"exit_marker_write=FAIL:{type(exc).__name__}")
+    raise SystemExit(exit_rc)
