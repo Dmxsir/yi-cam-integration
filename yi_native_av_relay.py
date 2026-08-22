@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Continuous phoneless YI PPPP/TNP relay producing H.264 + AAC in MPEG-TS.
+"""Integrated phoneless YI PPPP/TNP H264+AAC relay for go2rtc.
 
-The proprietary ARM64 PPPP library runs under the already-proven Bionic/qemu
-bridge. A tiny worker emits framed TNP channel 1/2/3 units to this host process.
-The host mirrors the YI APK media transforms, reorders H.264, preserves native
-AAC/ADTS, derives the initial A/V offset from the live TNP millisecond clock,
-and asks FFmpeg to mux both elementary streams with stream copy only.
-
-stdout is reserved for MPEG-TS when --stdout is used. Diagnostics are stderr
-only. No ADB/Android phone is used at runtime.
+This folds the Phase 3H-3J continuous-pipe fixes into one relay: bounded FFmpeg
+probe windows, explicit 90 kHz packet timestamps, an explicit MPEG-TS stdout
+pump, and shutdown handling that treats only an observed consumer EPIPE as a
+normal mux close. The finite --output path remains equivalent to the proven
+Phase 3G file path. No ADB or Android phone is used at runtime.
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import signal
@@ -21,9 +19,8 @@ import struct
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -38,12 +35,31 @@ import yi_live_relay
 import yi_tnp_oracle as oracle
 
 VIDEO_FPS = 20
+MPEGTS_TIME_BASE = 90000
+VIDEO_TICKS = MPEGTS_TIME_BASE // VIDEO_FPS
+AAC_SAMPLE_RATE = 16000
+AAC_SAMPLES_PER_FRAME = 1024
+AUDIO_TICKS = MPEGTS_TIME_BASE * AAC_SAMPLES_PER_FRAME // AAC_SAMPLE_RATE
 MAX_RECORD = 2 * 1024 * 1024 + 32
 STREAM_MAGIC = b"YAV1"
 
+_STDOUT_CONSUMER_CLOSED = threading.Event()
+_PUMPS: list[threading.Thread] = []
+
 
 def log(message: str) -> None:
-    print(f"[phase3g-relay] {message}", file=sys.stderr, flush=True)
+    try:
+        print(f"[phase3g-relay] {message}", file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+
+
+def _write_worker_stderr(line: bytes) -> None:
+    try:
+        sys.stderr.buffer.write(b"[phase3g-worker] " + line)
+        sys.stderr.buffer.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
 
 
 def payload(material: oracle.CameraMaterial, units: tuple[bytes, bytes, bytes, bytes]) -> bytes:
@@ -105,12 +121,45 @@ def decrypt_audio_unit(raw: bytes, password: str) -> tuple[int, bytes, dict[str,
     }
 
 
-def start_ffmpeg(
-    ffmpeg: str,
-    output: BinaryIO | None,
-    video_offset_ms: int,
-    audio_offset_ms: int,
-) -> tuple[subprocess.Popen[bytes], BinaryIO, BinaryIO]:
+def _setts(kind: str, start_ms: int) -> str:
+    start_ticks = int(start_ms) * MPEGTS_TIME_BASE // 1000
+    if kind == "video":
+        step = VIDEO_TICKS
+    elif kind == "audio":
+        step = AUDIO_TICKS
+    else:
+        raise ValueError(kind)
+    return (
+        "setts=time_base=1/90000:"
+        f"pts=N*{step}+{start_ticks}:"
+        f"dts=N*{step}+{start_ticks}:"
+        f"duration={step}"
+    )
+
+
+class _MuxProcessProxy:
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self._proc = proc
+
+    @property
+    def returncode(self) -> int | None:
+        return self._proc.returncode
+
+    def poll(self) -> int | None:
+        return self._proc.poll()
+
+    def wait(self, timeout: float | None = None) -> int:
+        rc = self._proc.wait(timeout=timeout)
+        if rc != 0 and _STDOUT_CONSUMER_CLOSED.is_set():
+            log(f"mpegts_mux_exit_rc={rc}; consumer_close_epipe=true; normalized_rc=0")
+            return 0
+        return rc
+
+    def kill(self) -> None:
+        self._proc.kill()
+
+
+def _start_ffmpeg_file(ffmpeg: str, output: BinaryIO, video_offset_ms: int, audio_offset_ms: int):
     video_r, video_w = os.pipe()
     audio_r, audio_w = os.pipe()
 
@@ -125,20 +174,11 @@ def start_ffmpeg(
     audio_opts += ["-f", "aac", "-i", f"pipe:{audio_r}"]
 
     command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-nostdin",
-        *video_opts,
-        *audio_opts,
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c", "copy",
-        "-muxdelay", "0",
-        "-muxpreload", "0",
-        "-mpegts_flags", "+resend_headers",
-        "-f", "mpegts",
-        "pipe:1",
+        ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostdin",
+        *video_opts, *audio_opts,
+        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+        "-muxdelay", "0", "-muxpreload", "0",
+        "-mpegts_flags", "+resend_headers", "-f", "mpegts", "pipe:1",
     ]
     try:
         proc = subprocess.Popen(
@@ -152,23 +192,123 @@ def start_ffmpeg(
     finally:
         os.close(video_r)
         os.close(audio_r)
-
     return proc, os.fdopen(video_w, "wb", buffering=0), os.fdopen(audio_w, "wb", buffering=0)
+
+
+def _start_ffmpeg_stdout(ffmpeg: str, video_offset_ms: int, audio_offset_ms: int):
+    _STDOUT_CONSUMER_CLOSED.clear()
+    video_r, video_w = os.pipe()
+    audio_r, audio_w = os.pipe()
+    ts_r, ts_w = os.pipe()
+    ts_writer = os.fdopen(ts_w, "wb", buffering=0)
+
+    video_opts = [
+        "-thread_queue_size", "512",
+        "-probesize", "262144",
+        "-analyzeduration", "500000",
+        "-fflags", "+nobuffer",
+        "-r", str(VIDEO_FPS),
+        "-f", "h264", "-i", f"pipe:{video_r}",
+    ]
+    audio_opts = [
+        "-thread_queue_size", "512",
+        "-probesize", "32768",
+        "-analyzeduration", "200000",
+        "-f", "aac", "-i", f"pipe:{audio_r}",
+    ]
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostdin",
+        *video_opts, *audio_opts,
+        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+        "-bsf:v", _setts("video", video_offset_ms),
+        "-bsf:a", _setts("audio", audio_offset_ms),
+        "-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0",
+        "-mpegts_flags", "+resend_headers", "-f", "mpegts", "pipe:1",
+    ]
+
+    log("mpegts_streaming_probe_tuning=video_probe_262144/video_analyze_500ms/audio_probe_32768/audio_analyze_200ms/thread_queue_512/flush_packets")
+    log(
+        "mpegts_timestamp_mode=SETTS_90KHZ; "
+        f"video_step_ticks={VIDEO_TICKS}; audio_step_ticks={AUDIO_TICKS}; "
+        f"video_offset_ms={video_offset_ms}; audio_offset_ms={audio_offset_ms}"
+    )
+
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=ts_writer,
+            stderr=sys.stderr.buffer,
+            pass_fds=(video_r, audio_r),
+            close_fds=True,
+        )
+    except Exception:
+        for fd in (video_r, video_w, audio_r, audio_w, ts_r):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        ts_writer.close()
+        raise
+    else:
+        os.close(video_r)
+        os.close(audio_r)
+        ts_writer.close()
+
+    def pump() -> None:
+        total = 0
+        first = True
+        next_report = 1024 * 1024
+        try:
+            while True:
+                chunk = os.read(ts_r, 65536)
+                if not chunk:
+                    break
+                if first:
+                    log(f"mpegts_stdout_first_chunk_bytes={len(chunk)}; sync_byte={'PASS' if chunk[0] == 0x47 else 'FAIL'}")
+                    first = False
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                total += len(chunk)
+                if total >= next_report:
+                    log(f"mpegts_stdout_progress_bytes={total}")
+                    next_report += 1024 * 1024
+        except BrokenPipeError:
+            _STDOUT_CONSUMER_CLOSED.set()
+            log("mpegts_stdout_consumer_closed=true; reason=EPIPE")
+        except OSError as exc:
+            if exc.errno == errno.EPIPE:
+                _STDOUT_CONSUMER_CLOSED.set()
+                log("mpegts_stdout_consumer_closed=true; reason=EPIPE")
+            else:
+                log(f"mpegts_stdout_pump_error={type(exc).__name__}")
+        finally:
+            try:
+                os.close(ts_r)
+            except OSError:
+                pass
+            log(f"mpegts_stdout_pumped_bytes={total}")
+
+    thread = threading.Thread(target=pump, name="yi-mpegts-stdout-pump", daemon=True)
+    thread.start()
+    _PUMPS.append(thread)
+    return _MuxProcessProxy(proc), os.fdopen(video_w, "wb", buffering=0), os.fdopen(audio_w, "wb", buffering=0)
+
+
+def start_ffmpeg(ffmpeg: str, output: BinaryIO | None, video_offset_ms: int, audio_offset_ms: int):
+    if output is not None:
+        return _start_ffmpeg_file(ffmpeg, output, video_offset_ms, audio_offset_ms)
+    return _start_ffmpeg_stdout(ffmpeg, video_offset_ms, audio_offset_ms)
 
 
 def validate_ts(path: Path, ffprobe: str) -> bool:
     proc = subprocess.run(
         [
-            ffprobe,
-            "-v", "error",
+            ffprobe, "-v", "error",
             "-show_entries", "stream=codec_name,codec_type,width,height,sample_rate,channels",
-            "-of", "json",
-            str(path),
+            "-of", "json", str(path),
         ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
+        capture_output=True, text=True, check=False, timeout=20,
     )
     if proc.returncode != 0:
         log("ffprobe_mpegts=FAIL")
@@ -203,6 +343,15 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def _close_pipe(pipe: BinaryIO | None) -> None:
+    if pipe is None or pipe.closed:
+        return
+    try:
+        pipe.close()
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def main() -> int:
     args = parser().parse_args()
     if args.stdout == bool(args.output):
@@ -217,7 +366,7 @@ def main() -> int:
     oracle.load_env_file(args.env_file)
     material: oracle.CameraMaterial | None = None
     child: subprocess.Popen[bytes] | None = None
-    mux: subprocess.Popen[bytes] | None = None
+    mux: Any | None = None
     video_pipe: BinaryIO | None = None
     audio_pipe: BinaryIO | None = None
     output_file: BinaryIO | None = None
@@ -234,11 +383,9 @@ def main() -> int:
         log("phone_required=false")
 
         command = [
-            args.qemu,
-            "-L", str(args.runtime),
+            args.qemu, "-L", str(args.runtime),
             "-E", "LD_LIBRARY_PATH=/data/local/tmp/yi-phase3g:/system/lib64",
-            str(worker),
-            "/data/local/tmp/yi-phase3g/libPPPP_API.so",
+            str(worker), "/data/local/tmp/yi-phase3g/libPPPP_API.so",
         ]
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if child.stdin is None or child.stdout is None or child.stderr is None:
@@ -250,11 +397,9 @@ def main() -> int:
         def drain_stderr() -> None:
             assert child is not None and child.stderr is not None
             for line in iter(child.stderr.readline, b""):
-                sys.stderr.buffer.write(b"[phase3g-worker] " + line)
-                sys.stderr.buffer.flush()
+                _write_worker_stderr(line)
 
-        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-        stderr_thread.start()
+        threading.Thread(target=drain_stderr, daemon=True).start()
 
         def request_stop() -> None:
             nonlocal stop_sent
@@ -298,10 +443,7 @@ def main() -> int:
             log(f"tnp_timebase=milliseconds; video_fps={VIDEO_FPS}; aac_frame_ms=64")
             log(f"initial_av_delta_ms={delta}; video_offset_ms={video_offset_ms}; audio_offset_ms={audio_offset_ms}")
             if audio_format is not None:
-                log(
-                    f"native_aac=object_type_{audio_format['object_type']}/"
-                    f"{audio_format['sample_rate']}Hz/{audio_format['channels']}ch"
-                )
+                log(f"native_aac=object_type_{audio_format['object_type']}/{audio_format['sample_rate']}Hz/{audio_format['channels']}ch")
             if args.output:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 output_file = args.output.open("wb")
@@ -381,13 +523,11 @@ def main() -> int:
                 timer.cancel()
 
         child_rc = child.wait(timeout=20)
-        if video_pipe is not None:
-            video_pipe.close()
-        if audio_pipe is not None:
-            audio_pipe.close()
+        _close_pipe(video_pipe)
+        _close_pipe(audio_pipe)
         mux_rc = mux.wait(timeout=20) if mux is not None else 1
         if output_file is not None:
-            output_file.close()
+            _close_pipe(output_file)
             output_file = None
 
         log(f"native_worker_exit={child_rc}; mpegts_mux_exit={mux_rc}; video_frames={video_frames}; audio_frames={audio_frames}")
@@ -399,15 +539,11 @@ def main() -> int:
             ok = validate_ts(args.output, args.ffprobe)
             log("PHASE3G_NATIVE_AV=PASS" if ok else "PHASE3G_NATIVE_AV=FAIL")
             return 0 if ok else 1
-
         return 0
     finally:
-        if video_pipe is not None and not video_pipe.closed:
-            video_pipe.close()
-        if audio_pipe is not None and not audio_pipe.closed:
-            audio_pipe.close()
-        if output_file is not None and not output_file.closed:
-            output_file.close()
+        _close_pipe(video_pipe)
+        _close_pipe(audio_pipe)
+        _close_pipe(output_file)
         if child is not None and child.poll() is None:
             child.kill()
         if mux is not None and mux.poll() is None:
@@ -416,5 +552,22 @@ def main() -> int:
             material.clear()
 
 
+def _write_exit_marker(rc: int) -> None:
+    raw = os.getenv("YI_PHASE3_EXIT_MARKER", "").strip()
+    if not raw:
+        return
+    path = Path(raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"relay_exit_rc={rc}\n", encoding="utf-8")
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_rc = 1
+    try:
+        exit_rc = main()
+    finally:
+        try:
+            _write_exit_marker(exit_rc)
+        except Exception as exc:
+            log(f"exit_marker_write=FAIL:{type(exc).__name__}")
+    raise SystemExit(exit_rc)
