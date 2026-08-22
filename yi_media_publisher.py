@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,15 +122,35 @@ class YiGo2RTCPublisher:
             pass
         return keys
 
-    def _api_ready(self) -> bool:
+    def _api_json(self, path: str, *, timeout: float = 1.5) -> dict[str, Any] | None:
         try:
-            with urllib.request.urlopen(self.api_base + "/api/streams", timeout=1.5) as response:
+            with urllib.request.urlopen(self.api_base + path, timeout=timeout) as response:
                 if response.status != 200:
-                    return False
+                    return None
                 payload = json.loads(response.read().decode("utf-8"))
-                return isinstance(payload, dict)
+                return payload if isinstance(payload, dict) else None
         except (OSError, ValueError, urllib.error.URLError):
-            return False
+            return None
+
+    def _api_ready(self) -> bool:
+        return self._api_json("/api/streams") is not None
+
+    def _stream_snapshot(self, stream_name: str) -> dict[str, Any] | None:
+        query = urllib.parse.quote(stream_name, safe="")
+        return self._api_json(f"/api/streams?src={query}")
+
+    @staticmethod
+    def _registered_mpegts_producers(snapshot: dict[str, Any] | None) -> int:
+        if not isinstance(snapshot, dict):
+            return 0
+        producers = snapshot.get("producers")
+        if not isinstance(producers, list):
+            return 0
+        return sum(
+            1
+            for producer in producers
+            if isinstance(producer, dict) and producer.get("format_name") == "mpegts"
+        )
 
     def _stop_locked(self) -> None:
         process = self._process
@@ -231,11 +252,15 @@ class YiGo2RTCPublisher:
         stream = media_stream_name(key)
         with self._lock:
             configured = key in self._stable_ids
+        snapshot = self._stream_snapshot(stream) if configured else None
+        producer_count = self._registered_mpegts_producers(snapshot)
         return {
             "stream_name": stream,
             "rtsp_path": media_rtsp_path(key),
             "rtsp_port": self.config.rtsp_port,
             "configured": configured,
+            "producer_registered": producer_count > 0,
+            "mpegts_producer_count": producer_count,
             "secrets_exposed": False,
         }
 
