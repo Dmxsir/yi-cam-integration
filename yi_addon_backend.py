@@ -140,6 +140,15 @@ class YiAddonBackend:
                 self._camera_operation_locks[stable_id] = lock
             return lock
 
+    def _resume_runtime_after_reprobe(self, stable_id: str, should_resume: bool) -> tuple[bool, dict[str, Any] | None]:
+        if not should_resume or self.lifecycle is None:
+            return False, self._runtime_for(stable_id)
+        try:
+            runtime = self.lifecycle.start(stable_id)
+        except (RuntimeError, ValueError, OSError):
+            return False, self._runtime_for(stable_id)
+        return bool(runtime.get("desired_running")), runtime
+
     def discover(self, *, fetch_tnp: bool = True) -> dict[str, Any]:
         manager = YiCameraManager(timeout=self.timeout)
         try:
@@ -317,29 +326,20 @@ class YiAddonBackend:
                     }
 
             try:
-                result = self.capability_probe.probe(stable_id)
+                result = self.capability_probe.probe(stable_id, session_handoff=resume_runtime)
             except CapabilityProbeError as exc:
-                resumed = None
-                if resume_runtime and self.lifecycle is not None:
-                    try:
-                        resumed = self.lifecycle.start(stable_id)
-                    except (RuntimeError, ValueError, OSError):
-                        resumed = self._runtime_for(stable_id)
+                resumed_ok, resumed = self._resume_runtime_after_reprobe(stable_id, resume_runtime)
                 return 502, {
                     "ok": False,
                     "operation": "reprobe",
                     "error": {"code": exc.category, "message": exc.safe_message},
-                    "runtime_resumed": resume_runtime,
+                    "runtime_was_running": resume_runtime,
+                    "runtime_resumed": resumed_ok,
                     "runtime": resumed,
                     "secrets_exposed": False,
                 }
             except (RuntimeError, ValueError, OSError):
-                resumed = None
-                if resume_runtime and self.lifecycle is not None:
-                    try:
-                        resumed = self.lifecycle.start(stable_id)
-                    except (RuntimeError, ValueError, OSError):
-                        resumed = self._runtime_for(stable_id)
+                resumed_ok, resumed = self._resume_runtime_after_reprobe(stable_id, resume_runtime)
                 return 500, {
                     "ok": False,
                     "operation": "reprobe",
@@ -347,7 +347,8 @@ class YiAddonBackend:
                         "code": "reprobe_failed",
                         "message": "The live camera capability reprobe failed.",
                     },
-                    "runtime_resumed": resume_runtime,
+                    "runtime_was_running": resume_runtime,
+                    "runtime_resumed": resumed_ok,
                     "runtime": resumed,
                     "secrets_exposed": False,
                 }
@@ -360,31 +361,29 @@ class YiAddonBackend:
                         capability=result.capability,
                     )
 
-            resumed = None
-            if resume_runtime and self.lifecycle is not None:
-                try:
-                    resumed = self.lifecycle.start(stable_id)
-                except (RuntimeError, ValueError, OSError):
-                    return 500, {
-                        "ok": False,
-                        "operation": "reprobe",
-                        "probe": result.safe_dict(),
-                        "error": {
-                            "code": "runtime_resume_failed",
-                            "message": "The capability probe passed but the camera runtime could not be resumed.",
-                        },
-                        "runtime_resumed": False,
-                        "runtime": self._runtime_for(stable_id),
-                        "secrets_exposed": False,
-                    }
+            resumed_ok, resumed = self._resume_runtime_after_reprobe(stable_id, resume_runtime)
+            if resume_runtime and not resumed_ok:
+                return 500, {
+                    "ok": False,
+                    "operation": "reprobe",
+                    "probe": result.safe_dict(),
+                    "error": {
+                        "code": "runtime_resume_failed",
+                        "message": "The capability probe passed but the camera runtime could not be resumed.",
+                    },
+                    "runtime_was_running": True,
+                    "runtime_resumed": False,
+                    "runtime": resumed,
+                    "secrets_exposed": False,
+                }
 
             return 200, {
                 "ok": True,
                 "operation": "reprobe",
                 "probe": result.safe_dict(),
                 "runtime_was_running": resume_runtime,
-                "runtime_resumed": resume_runtime,
-                "runtime": resumed if resumed is not None else self._runtime_for(stable_id),
+                "runtime_resumed": resumed_ok if resume_runtime else False,
+                "runtime": resumed,
                 "secrets_exposed": False,
             }
 
