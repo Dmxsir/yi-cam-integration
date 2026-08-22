@@ -16,6 +16,9 @@ LOG="$ANALYSIS_DIR/go2rtc-phase3h2.log"
 API_SNAPSHOT="$ANALYSIS_DIR/go2rtc-phase3h2-stream.json"
 PROBE_JSON="$ANALYSIS_DIR/go2rtc-phase3h2-ffprobe.json"
 PROBE_ERR="$ANALYSIS_DIR/go2rtc-phase3h2-ffprobe.err"
+VIDEO_DECODE_ERR="$ANALYSIS_DIR/go2rtc-phase3h2-video-decode.err"
+AUDIO_DECODE_ERR="$ANALYSIS_DIR/go2rtc-phase3h2-audio-decode.err"
+COMBINED_DECODE_ERR="$ANALYSIS_DIR/go2rtc-phase3h2-combined-decode.err"
 API_PORT="${PHASE3H2_API_PORT:-11984}"
 RTSP_PORT="${PHASE3H2_RTSP_PORT:-18554}"
 STREAM="yi_warehouse_phase3"
@@ -37,7 +40,8 @@ done
 
 mkdir -p "$ANALYSIS_DIR"
 chmod 700 "$ANALYSIS_DIR"
-rm -f "$CONFIG" "$LOG" "$API_SNAPSHOT" "$PROBE_JSON" "$PROBE_ERR"
+rm -f "$CONFIG" "$LOG" "$API_SNAPSHOT" "$PROBE_JSON" "$PROBE_ERR" \
+    "$VIDEO_DECODE_ERR" "$AUDIO_DECODE_ERR" "$COMBINED_DECODE_ERR"
 
 for port in "$API_PORT" "$RTSP_PORT"; do
     if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
@@ -89,13 +93,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+ready=0
 for _ in $(seq 1 100); do
     if curl -fsS --max-time 1 "http://127.0.0.1:${API_PORT}/" >/dev/null 2>&1; then
+        ready=1
         echo "go2rtc_isolated_start=PASS"
         break
     fi
     sleep 0.1
 done
+if [[ "$ready" != 1 ]]; then
+    echo "go2rtc_isolated_start=FAIL" >&2
+    tail -n 160 "$LOG" >&2 || true
+    exit 5
+fi
 
 API_URL="http://127.0.0.1:${API_PORT}/api/streams?src=${STREAM}"
 source_ready=0
@@ -164,8 +175,63 @@ raise SystemExit(0 if ok else 1)
 '
 
 echo "go2rtc_decode_smoke=START"
-timeout 25 "$FFMPEG" -hide_banner -loglevel error -rtsp_transport tcp -i "$RTSP_URL" -t 6 -map 0:v:0 -map 0:a:0 -f null -
+
+# Decode by frame count first. This deliberately does not depend on stream PTS,
+# so it distinguishes actual codec delivery from the known Phase 3G timestamp
+# warning. Each consumer connects to the already-preloaded producer.
+set +e
+timeout 20 "$FFMPEG" -hide_banner -loglevel error -rtsp_transport tcp -i "$RTSP_URL" \
+    -map 0:v:0 -an -frames:v 50 -f null - 2>"$VIDEO_DECODE_ERR"
+VIDEO_RC=$?
+timeout 20 "$FFMPEG" -hide_banner -loglevel error -rtsp_transport tcp -i "$RTSP_URL" \
+    -map 0:a:0 -vn -frames:a 50 -f null - 2>"$AUDIO_DECODE_ERR"
+AUDIO_RC=$?
+set -e
+
+echo "go2rtc_video_decode_rc=$VIDEO_RC"
+echo "go2rtc_audio_decode_rc=$AUDIO_RC"
+if [[ "$VIDEO_RC" -ne 0 ]]; then
+    echo "go2rtc_video_decode=FAIL" >&2
+    tail -n 120 "$VIDEO_DECODE_ERR" >&2 || true
+fi
+if [[ "$AUDIO_RC" -ne 0 ]]; then
+    echo "go2rtc_audio_decode=FAIL" >&2
+    tail -n 120 "$AUDIO_DECODE_ERR" >&2 || true
+fi
+if [[ "$VIDEO_RC" -ne 0 || "$AUDIO_RC" -ne 0 ]]; then
+    echo "--- go2rtc LOG TAIL ---" >&2
+    tail -n 220 "$LOG" >&2 || true
+    echo "PHASE3H2_GO2RTC=FAIL" >&2
+    exit 10
+fi
+
+echo "go2rtc_video_decode=PASS"
+echo "go2rtc_audio_decode=PASS"
 echo "go2rtc_decode_smoke=PASS"
+
+# Keep the old duration-based combined decode only as a timestamp diagnostic.
+# A timeout here no longer hides the successful codec test; it tells us the
+# next work item is PTS generation before production cutover.
+set +e
+timeout 12 "$FFMPEG" -hide_banner -loglevel error -rtsp_transport tcp -i "$RTSP_URL" \
+    -t 4 -map 0:v:0 -map 0:a:0 -f null - 2>"$COMBINED_DECODE_ERR"
+COMBINED_RC=$?
+set -e
+
+echo "go2rtc_combined_timed_decode_rc=$COMBINED_RC"
+if [[ "$COMBINED_RC" -eq 0 ]]; then
+    echo "go2rtc_combined_timed_decode=PASS"
+    echo "phase3i_timestamp_status=PASS"
+elif [[ "$COMBINED_RC" -eq 124 ]]; then
+    echo "go2rtc_combined_timed_decode=TIMEOUT"
+    echo "phase3i_timestamp_status=NEEDS_FIX"
+else
+    echo "go2rtc_combined_timed_decode=FAIL" >&2
+    tail -n 120 "$COMBINED_DECODE_ERR" >&2 || true
+    echo "PHASE3H2_GO2RTC=FAIL" >&2
+    exit 11
+fi
+
 echo "--- go2rtc LOG TAIL ---"
 tail -n 120 "$LOG" || true
 echo "PHASE3H2_GO2RTC=PASS"
