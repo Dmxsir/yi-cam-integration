@@ -2,9 +2,14 @@
 """Print a secret-safe model inventory for cameras in the configured YI account.
 
 This intentionally omits UID, DID, IP/MAC, encrypted password, license,
-InitString, tokens and all auth material.  ``interVersion`` is shown only as a
+InitString, tokens and all auth material. ``interVersion`` is shown only as a
 cloud-reported version-like field; its exact semantics are not assumed to be
 the authoritative running firmware version.
+
+Model resolution keeps evidence sources separate:
+- APK feature_config registry is authoritative for mappings present in the APK.
+- Supplemental external evidence is used only for an exact raw-model + cloud
+  version match when the APK registry has no unique mapping.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import yi_cloud_probe as cloud
+import yi_model_evidence as external_evidence
 import yi_model_registry as registry
 import yi_tnp_oracle as oracle
 
@@ -88,23 +94,46 @@ def main() -> int:
     print(f"camera_count={len(cameras)}")
     print("secret_fields_logged=false")
     print("firmware_note=cloud_inter_version_is_version_like_only_not_authoritative_firmware")
+    print("resolution_policy=apk_registry_then_exact_raw_model_plus_cloud_version_external_evidence")
+
     for index, camera in enumerate(cameras):
         raw_model = str(camera.get("model", ""))
         did = camera.get("did")
-        resolved, evidence = registry.resolve(raw_model, did)
-        candidates = registry.candidates(raw_model, did)
-        candidate_models = ",".join(sorted({item.model for item in candidates})) or "UNKNOWN"
-        branches = ",".join(sorted({item.firmware_branch for item in candidates if item.firmware_branch})) or "UNKNOWN"
         inter_version = camera.get("interVersion")
         if not isinstance(inter_version, (str, int, float)) or isinstance(inter_version, bool):
             inter_version = "UNKNOWN"
+
+        registry_model, registry_evidence = registry.resolve(raw_model, did)
+        candidates = registry.candidates(raw_model, did)
+        apk_candidate_models = ",".join(sorted({item.model for item in candidates})) or "UNKNOWN"
+        branches = ",".join(sorted({item.firmware_branch for item in candidates if item.firmware_branch})) or "UNKNOWN"
+
+        supplemental = external_evidence.resolve(raw_model, inter_version)
+        if registry_model != "UNKNOWN":
+            resolved = registry_model
+            resolution_evidence = registry_evidence
+            marketing_name = "UNKNOWN"
+            evidence_sources = "APK_feature_config"
+        elif supplemental is not None:
+            resolved = supplemental.model
+            resolution_evidence = supplemental.evidence
+            marketing_name = supplemental.marketing_name
+            evidence_sources = ",".join(supplemental.sources)
+        else:
+            resolved = "UNKNOWN"
+            resolution_evidence = registry_evidence
+            marketing_name = "UNKNOWN"
+            evidence_sources = "NONE"
+
         print(f"camera[{index}].name={str(camera.get('name', ''))}")
         print(f"camera[{index}].raw_model={raw_model}")
         print(f"camera[{index}].resolved_model={resolved}")
-        print(f"camera[{index}].resolution_evidence={evidence}")
-        print(f"camera[{index}].candidate_models={candidate_models}")
+        print(f"camera[{index}].resolution_evidence={resolution_evidence}")
+        print(f"camera[{index}].marketing_name={marketing_name}")
+        print(f"camera[{index}].apk_candidate_models={apk_candidate_models}")
         print(f"camera[{index}].firmware_branches={branches}")
         print(f"camera[{index}].cloud_inter_version={inter_version}")
+        print(f"camera[{index}].evidence_sources={evidence_sources}")
         print(f"camera[{index}].p2p_type={camera.get('type')}")
         print(f"camera[{index}].online={camera.get('online') is True}")
 
