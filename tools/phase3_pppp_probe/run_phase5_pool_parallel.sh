@@ -62,18 +62,59 @@ PY
     [[ "$ok" == 1 ]]
 }
 
-write_dual_config() {
-    local path="$1"
-    cat >"$path" <<EOF
-streams:
-  yi_warehouse: 'exec:${PYTHON} ${RELAY} --env-file ${ENV_FILE} --runtime ${RUNTIME} --worker-dir ${WORKER_DIR} --qemu qemu-aarch64 --ffmpeg ffmpeg --ffprobe ffprobe --stdout#killsignal=2#killtimeout=20#starttimeout=45'
-  yi_pool: 'exec:${PYTHON} ${SELECTOR} --camera pool --env-file ${ENV_FILE} --runtime ${RUNTIME} --worker-dir ${WORKER_DIR} --qemu qemu-aarch64 --ffmpeg ffmpeg --ffprobe ffprobe --stdout#killsignal=2#killtimeout=20#starttimeout=45'
+render_dual_config() {
+    local source="$1"
+    local target="$2"
+    "$PYTHON" - "$source" "$target" "$PYTHON" "$SELECTOR" "$ENV_FILE" "$RUNTIME" "$WORKER_DIR" <<'PY'
+from pathlib import Path
+import sys
 
-preload:
-  yi_warehouse: "video&audio"
-  yi_pool: "video&audio"
-EOF
-    chmod 600 "$path"
+src, dst, python, selector, env_file, runtime, worker_dir = sys.argv[1:]
+text = Path(src).read_text(encoding="utf-8")
+lines = text.splitlines()
+
+
+def section_bounds(name: str):
+    marker = f"{name}:"
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == marker and not line.startswith((" ", "\t")))
+    except StopIteration:
+        return None
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if line and not line.startswith((" ", "\t", "#")):
+            end = i
+            break
+    return start, end
+
+streams = section_bounds("streams")
+if streams is None:
+    raise SystemExit("top-level streams section missing")
+s0, s1 = streams
+stream_block = lines[s0 + 1:s1]
+if not any(line.startswith("  yi_warehouse:") for line in stream_block):
+    raise SystemExit("yi_warehouse missing from streams section")
+if not any(line.startswith("  yi_pool:") for line in stream_block):
+    pool = (
+        f"  yi_pool: 'exec:{python} {selector} --camera pool --env-file {env_file} "
+        f"--runtime {runtime} --worker-dir {worker_dir} --qemu qemu-aarch64 --ffmpeg ffmpeg "
+        f"--ffprobe ffprobe --stdout#killsignal=2#killtimeout=20#starttimeout=45'"
+    )
+    lines.insert(s1, pool)
+
+preload = section_bounds("preload")
+if preload is None:
+    lines.extend(["", "preload:", '  yi_pool: "video&audio"'])
+else:
+    p0, p1 = preload
+    preload_block = lines[p0 + 1:p1]
+    if not any(line.startswith("  yi_pool:") for line in preload_block):
+        lines.insert(p1, '  yi_pool: "video&audio"')
+
+Path(dst).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+    chmod 600 "$target"
 }
 
 rollback() {
@@ -96,11 +137,6 @@ apply() {
     [[ -x "$PYTHON" ]] || fail "python missing: $PYTHON"
     service_active || fail "$SERVICE is not active before Phase 5"
 
-    grep -q '^  yi_warehouse:' "$PROD_CONFIG" || fail "yi_warehouse missing from production config"
-    if grep -q '^  yi_pool:' "$PROD_CONFIG"; then
-        echo "yi_pool_already_present=true"
-    fi
-
     local stamp backup candidate work
     stamp="$(date +%Y%m%d-%H%M%S)"
     backup="$STATE_ROOT/phase5-pool-$stamp"
@@ -110,9 +146,10 @@ apply() {
     cp -f "$PROD_CONFIG" "$backup/go2rtc.yaml"
     echo "production_backup_dir=$backup"
 
-    write_dual_config "$candidate"
+    render_dual_config "$PROD_CONFIG" "$candidate"
+    echo "existing_config_preserved=PASS"
     cp -f "$candidate" "$PROD_CONFIG"
-    echo "dual_stream_config_installed=PASS"
+    echo "yi_pool_config_installed=PASS"
 
     if ! service_restart || ! service_active; then
         echo "service_restart=FAIL; rolling_back=true" >&2
