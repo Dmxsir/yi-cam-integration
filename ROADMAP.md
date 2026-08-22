@@ -45,18 +45,6 @@ The detailed implementation sequence and exit gates are documented in [`docs/dev
 
 Goal: remove Phase 3 single-camera assumptions and build the future Add-on Camera Manager.
 
-Requirements completed:
-
-- Login once per account session.
-- Enumerate all cameras automatically.
-- Deterministic secret-safe `stable_id` per camera.
-- Raw/normalized models retained as metadata only.
-- No target camera names or model whitelist.
-- Secret-safe TNP material readiness checks.
-- Development CLI is only an adapter around reusable backend classes.
-
-Implementation: `yi_camera_manager.py`.
-
 Live account proof (2026-08-23):
 
 - 7/7 cameras discovered automatically.
@@ -65,40 +53,24 @@ Live account proof (2026-08-23):
 - 7/7 `/v4/tnp/device_info` requests succeeded.
 - 7/7 cameras reported `tnp_material_ready=true` and `probe_candidate=true`.
 - Raw cloud models observed: `89`, `83`, `40`, `89`, `5`, `51`, `83`.
-- All currently normalize to `UNKNOWN`; this is accepted because model mapping is metadata, not a support whitelist.
 - Production streams were not modified by discovery.
 
 Exit criteria: PASS.
 
 ### Phase 6B — Generic camera runtime and capability probe — COMPLETE
 
-Goal: start a camera from `stable_id`, not camera name/model constants, and remember proven behavior rather than treating model numbers as a support whitelist.
-
 Completed implementation:
 
 - `yi_camera_runtime.py` — reusable Add-on backend/runtime material provider.
-- `yi_native_av_relay_stable.py` — development adapter that feeds a `stable_id` runtime into the already-proven native relay.
-- `yi_capability_cache.py` — atomic persistent secret-safe per-camera profile/media capability cache.
-- `tools/phase3_pppp_probe/run_phase6b_stable_probe.sh` — compact development probe wrapper; successful H264/AAC observations are recorded in the capability cache.
-- `tools/phase3_pppp_probe/run_phase6b_pool_stable_cutover.sh` — safe production proof that replaces only the pool selector with a `stable_id` runtime and rolls back automatically on validation failure.
-- Generic runtime prefers a previously proven cached profile when available; cache failure/corruption falls back safely to a probe candidate rather than blocking camera startup.
+- `yi_native_av_relay_stable.py` — stable-id development adapter around the proven native relay.
+- `yi_capability_cache.py` — atomic persistent secret-safe per-camera capability cache.
+- Generic runtime prefers a previously proven cached profile when available.
 
-Live generic-runtime evidence (2026-08-23):
+Live evidence:
 
-- `ptz`, raw model `40`, resolved only by `stable_id`.
-- PPPP initialized and connected successfully.
-- TNP-v2 startup commands `4881 -> 9029 -> 768` were accepted.
-- TNP authentication response command `4882` returned auth result `0`.
-- Native media readers started successfully.
-- Observed media: H264 1920x1080 and AAC-LC 16 kHz mono.
-- Relay completed with `PHASE3G_NATIVE_AV=PASS` and `rc=0`.
-- This proves the generic runtime path is not restricted to raw model `83`.
-- `pool`, raw model `83`, was cut over in production to `stable_id=867ecdee5a3692c669f9` while keeping the existing per-camera supervisor.
-- Production validation passed for both `yi_warehouse` and `yi_pool`; the pool process was confirmed to be running through `yi_native_av_relay_stable.py` and the warehouse configuration remained unchanged.
-- A raw model `89` attempt failed at `PPPP_Connect`; the same camera was also unavailable in the official YI app at the time, so that result is classified as camera/runtime reachability failure rather than profile incompatibility.
-- Live PTZ probe wrote a capability record to the persistent cache and an independent read returned the same successful record.
-- Cached PTZ profile: `tnp_v2_resolution_1_h264_aac`, H264 1920x1080, AAC 16000 Hz mono.
-- Cache output reported `secrets_exposed=false`.
+- PTZ raw model `40` passed PPPP/TNP and H264 1920x1080 + AAC 16 kHz mono through the generic stable-id path.
+- Pool raw model `83` passed production cutover through the same generic stable-id path.
+- Live PTZ probe wrote and read back a successful capability record.
 
 Exit criteria: PASS.
 
@@ -108,71 +80,68 @@ Goal: turn the reusable backend into the long-running engine that will be packag
 
 #### Phase 6C.1 — Backend state + HTTP API — COMPLETE
 
-Current implementation:
+Implemented and proven:
 
-- `yi_addon_backend.py` — thread-safe secret-safe Add-on state core.
-- `yi_addon_service.py` — versioned HTTP service.
-- `tools/phase3_pppp_probe/run_phase6c_api_smoke.sh` — live API/discovery/cache/graceful-shutdown validation.
+- `yi_addon_backend.py` state core.
+- `yi_addon_service.py` versioned HTTP API.
+- `/health`, `/cameras`, per-camera status and `/discover`.
+- Loopback default, bearer token requirement for non-loopback binding.
+- Secret-field scan passed.
+- Graceful shutdown passed.
+- `PHASE6C_API_SMOKE=PASS`.
 
-Current API surface:
+#### Phase 6C.2 — Per-camera runtime lifecycle manager — COMPLETE
 
-- `GET /api/v1/health`
-- `GET /api/v1/cameras`
-- `GET /api/v1/cameras/{stable_id}`
-- `GET /api/v1/cameras/{stable_id}/status`
-- `POST /api/v1/discover`
-- `POST /api/v1/cameras/{stable_id}/restart`
-- `POST /api/v1/cameras/{stable_id}/reprobe`
+Implemented:
 
-Security/runtime rules already implemented:
+- One independent supervised runtime per `stable_id`.
+- Start/stop/restart selected camera only.
+- Automatic recreation after supervisor exit/stall with bounded backoff.
+- Structured states: `stopped`, `starting`, `running`, `restarting`, `stopping`, `error`.
+- Global backend shutdown stops managed runtimes and descendants.
 
-- Loopback-only binding by default.
-- Non-loopback binding requires `YI_ADDON_API_TOKEN` bearer authentication.
-- Secret-bearing connection material is never retained in the API backend snapshot.
-- Capability cache data is exposed only in its secret-safe form.
-- Temporary cloud discovery failure does not kill the service; `/health` remains available and discovery can be retried.
-- SIGINT/SIGTERM trigger graceful HTTP shutdown.
+Live PTZ lifecycle proof (2026-08-23):
 
-Live API smoke proof (2026-08-23):
-
-- Backend and HTTP service compiled successfully.
-- Service started on `127.0.0.1:18099`.
-- `GET /api/v1/health` returned successfully.
-- API returned all 7 discovered cameras.
-- One proven cached capability was visible through the API.
-- `POST /api/v1/discover` refreshed the account inventory successfully.
-- Recursive secret-field scan of API payloads passed.
-- SIGTERM graceful shutdown passed.
-- Smoke test completed with `PHASE6C_API_SMOKE=PASS`.
+- Runtime started through HTTP and reached `running`.
+- Native media readers/mux startup was observed.
+- Manual restart replaced lifecycle PID `7373` with PID `7422`.
+- Stop removed the stable relay cleanly.
+- Service shutdown left no runtime descendants.
+- `PHASE6C_LIFECYCLE_SMOKE=PASS`.
 
 Exit criteria: PASS.
 
-#### Phase 6C.2 — Per-camera runtime lifecycle manager — ACTIVE
+#### Phase 6C.3 — Runtime control API — COMPLETE
 
-Next implementation target:
-
-- Backend owns one independent supervised runtime per `stable_id`.
-- Start/stop/restart selected camera without affecting others.
-- Lifecycle manager recreates a camera runtime after supervisor stall exit.
-- Structured states: `stopped`, `starting`, `running`, `restarting`, `stopping`, `error`.
-- Global backend shutdown leaves no relay/QEMU/FFmpeg descendants.
-
-#### Phase 6C.3 — Runtime control API — PLANNED
-
-Add/wire:
+Implemented:
 
 - `POST /api/v1/cameras/{stable_id}/start`
 - `POST /api/v1/cameras/{stable_id}/stop`
 - `POST /api/v1/cameras/{stable_id}/restart`
+- Idempotent lifecycle behavior and structured runtime state.
+- Per-camera backend operation locks serialize concurrent control/reprobe operations for the same camera.
+- Different camera controllers remain independent.
 
-Exit gate: start/status/restart/stop proven through HTTP only.
+HTTP-only start/status/restart/stop exit gate passed as part of `PHASE6C_LIFECYCLE_SMOKE=PASS`.
 
-#### Phase 6C.4 — Live reprobe + cache refresh — PLANNED
+Exit criteria: PASS.
 
-- Wire `POST /api/v1/cameras/{stable_id}/reprobe` to a bounded live media probe.
-- Update capability cache only after observed H264/AAC success.
-- Preserve prior proven record on probe failure.
-- Resume previous runtime state when appropriate.
+#### Phase 6C.4 — Live reprobe + cache refresh — ACTIVE
+
+Current implementation:
+
+- `yi_capability_probe_runtime.py` — reusable bounded live reprobe core.
+- `POST /api/v1/cameras/{stable_id}/reprobe` now performs a real live probe.
+- A running camera is isolated before reprobe and restored afterward.
+- Capability cache is updated only after observed H264 + AAC success.
+- Failed probes do not overwrite an existing proven cache record.
+- Reprobe responses expose only secret-safe capability/runtime state.
+- `tools/phase3_pppp_probe/run_phase6c_reprobe_smoke.sh` validates the full HTTP reprobe flow using an isolated temporary cache.
+
+Exit gate pending live proof:
+
+- HTTP reprobe refreshes capability `observed_at`/source for PTZ.
+- PTZ resumes `running` with a new runtime PID after the probe.
 
 #### Phase 6C.5 — Add-on-owned RTSP publication — PLANNED
 
