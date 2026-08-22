@@ -86,8 +86,11 @@ Implementation direction:
 
 - `yi_camera_runtime.py` — reusable Add-on backend/runtime material provider.
 - `yi_native_av_relay_stable.py` — development adapter that feeds a `stable_id` runtime into the already-proven native relay.
-- `tools/phase3_pppp_probe/run_phase6b_stable_probe.sh` — compact development probe wrapper around the reusable runtime path.
+- `yi_capability_cache.py` — persistent secret-safe per-camera profile/media capability cache.
+- `tools/phase3_pppp_probe/run_phase6b_stable_probe.sh` — compact development probe wrapper; successful H264/AAC observations are recorded in the capability cache.
+- `tools/phase3_pppp_probe/run_phase6b_pool_stable_cutover.sh` — safe production proof that replaces only the pool selector with a `stable_id` runtime and rolls back automatically on validation failure.
 - The initial safe probe profile reuses the proven TNP-v2 command sequence. Success is determined by observed H264/AAC output, not raw model number.
+- Generic runtime prefers a previously proven cached profile when available; cache failure/corruption falls back safely to a probe candidate rather than blocking camera startup.
 
 Live generic-runtime evidence (2026-08-23):
 
@@ -99,13 +102,16 @@ Live generic-runtime evidence (2026-08-23):
 - Observed media: H264 1920x1080 and AAC-LC 16 kHz mono.
 - Relay completed with `PHASE3G_NATIVE_AV=PASS` and `rc=0`.
 - This proves the generic runtime path is not restricted to raw model `83`.
+- `pool`, raw model `83`, was cut over in production to `stable_id=867ecdee5a3692c669f9` while keeping the existing per-camera supervisor.
+- Production validation passed for both `yi_warehouse` and `yi_pool`; the pool process was confirmed to be running through `yi_native_av_relay_stable.py` and the warehouse configuration remained unchanged.
+- This proves a known model-83 camera also works through the generic `stable_id` path in the supervised production topology.
 - A raw model `89` attempt failed at `PPPP_Connect`; the same camera was also unavailable in the official YI app at the time, so that result is classified as camera/runtime reachability failure rather than profile incompatibility.
 
-Exit criteria:
+Exit criteria status:
 
-- Known model-83 cameras work through the generic path.
-- At least one additional raw model is tested without adding a model whitelist. **PASS: raw model 40.**
-- Capability/profile result caching is implemented before Phase 6B is closed.
+- Known model-83 cameras work through the generic path. **PASS: pool model 83.**
+- At least one additional raw model is tested without adding a model whitelist. **PASS: PTZ model 40.**
+- Capability/profile result caching is implemented. **IMPLEMENTED; live cache write/read proof pending.**
 
 ### Phase 6C — Add-on service/API — PLANNED
 
