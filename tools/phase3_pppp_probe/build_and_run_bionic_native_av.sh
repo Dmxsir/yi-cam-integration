@@ -50,7 +50,12 @@ for name in libm.so libstdc++.so; do
         -o "$TARGET_DIR/$name" "$SRC_DIR/empty_shim.c"
 done
 
-"$CC" -nostdlib -fPIE -pie -fno-stack-protector -fno-builtin \
+# GCC 13 enables AArch64 outlined atomics by default and may emit helper calls
+# such as __aarch64_swp4_sync.  This worker is intentionally linked with
+# -nostdlib against the copied Bionic runtime, so those libgcc helper symbols
+# are not available.  Force the lock primitive to be emitted inline as native
+# AArch64 LL/SC instructions instead of adding a new runtime dependency.
+"$CC" -nostdlib -fPIE -pie -fno-stack-protector -fno-builtin -mno-outline-atomics \
     -Wl,-e,_start \
     -Wl,--dynamic-linker,/system/bin/linker64 \
     -Wl,--no-as-needed \
