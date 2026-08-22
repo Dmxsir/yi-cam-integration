@@ -20,6 +20,7 @@ stderr.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
@@ -31,6 +32,7 @@ import yi_native_av_relay as base
 
 _ORIGINAL_START_FFMPEG = base.start_ffmpeg
 _PUMPS: list[threading.Thread] = []
+_STDOUT_CONSUMER_CLOSED = threading.Event()
 
 MPEGTS_TIME_BASE = 90000
 VIDEO_TICKS = MPEGTS_TIME_BASE // base.VIDEO_FPS  # 4500 ticks = 50 ms
@@ -55,6 +57,38 @@ def _setts(kind: str, start_ms: int) -> str:
     )
 
 
+class _MuxProcessProxy:
+    """Normalize only the expected FFmpeg EPIPE caused by go2rtc closing stdout.
+
+    base.main() already requires the native PPPP worker itself to exit with 0.
+    During an exec/pipe shutdown, however, go2rtc can close its read side before
+    FFmpeg has finished draining. The stdout pump then observes EPIPE and closes
+    the private TS pipe, which makes FFmpeg exit non-zero even though this is the
+    normal consumer-close lifecycle. Treat that one explicitly observed case as
+    a clean mux exit so base.main() can still enforce native-worker success.
+    """
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self._proc = proc
+
+    @property
+    def returncode(self):
+        return self._proc.returncode
+
+    def poll(self):
+        return self._proc.poll()
+
+    def wait(self, timeout=None):
+        rc = self._proc.wait(timeout=timeout)
+        if rc != 0 and _STDOUT_CONSUMER_CLOSED.is_set():
+            base.log(f"mpegts_mux_exit_rc={rc}; consumer_close_epipe=true; normalized_rc=0")
+            return 0
+        return rc
+
+    def kill(self):
+        return self._proc.kill()
+
+
 def _start_ffmpeg_with_explicit_stdout(
     ffmpeg: str,
     output: BinaryIO | None,
@@ -66,6 +100,7 @@ def _start_ffmpeg_with_explicit_stdout(
     if output is not None:
         return _ORIGINAL_START_FFMPEG(ffmpeg, output, video_offset_ms, audio_offset_ms)
 
+    _STDOUT_CONSUMER_CLOSED.clear()
     video_r, video_w = os.pipe()
     audio_r, audio_w = os.pipe()
     ts_r, ts_w = os.pipe()
@@ -169,7 +204,13 @@ def _start_ffmpeg_with_explicit_stdout(
                     base.log(f"mpegts_stdout_progress_bytes={total}")
                     next_report += 1024 * 1024
         except BrokenPipeError:
-            base.log("mpegts_stdout_consumer_closed=true")
+            _STDOUT_CONSUMER_CLOSED.set()
+            base.log("mpegts_stdout_consumer_closed=true; reason=EPIPE")
+        except OSError as exc:
+            if exc.errno != errno.EPIPE:
+                raise
+            _STDOUT_CONSUMER_CLOSED.set()
+            base.log("mpegts_stdout_consumer_closed=true; reason=EPIPE")
         finally:
             try:
                 os.close(ts_r)
@@ -181,7 +222,7 @@ def _start_ffmpeg_with_explicit_stdout(
     thread.start()
     _PUMPS.append(thread)
     return (
-        proc,
+        _MuxProcessProxy(proc),
         os.fdopen(video_w, "wb", buffering=0),
         os.fdopen(audio_w, "wb", buffering=0),
     )
