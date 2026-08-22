@@ -130,22 +130,24 @@ class YiPersistentAddonBackend(YiAddonBackend):
     def _availability_loop(self) -> None:
         while not self._availability_stop.wait(self.availability_refresh_interval):
             try:
-                self.refresh_availability()
+                self.refresh_availability(stop_event=self._availability_stop)
             except Exception:
                 # Availability failures must never crash the App. Existing
                 # runtimes are left alone when state is unknown.
                 continue
 
-    def refresh_availability(self) -> dict[str, Any]:
+    def refresh_availability(self, *, stop_event: threading.Event | None = None) -> dict[str, Any]:
         if self.availability_probe is None:
             return self._availability_summary()
-        results = self.availability_probe.refresh()
+        results = self.availability_probe.refresh(stop_event)
         now = _utc_now()
         with self._lock:
             for stable_id, record in results.items():
                 if stable_id in self._cameras:
                     self._availability[stable_id] = record
             self._availability_last_refresh_at = now
+        if stop_event is not None and stop_event.is_set():
+            return self._availability_summary()
         reconcile = self._reconcile_runtime_policy()
         payload = self._availability_summary()
         payload["runtime_restore"] = reconcile
@@ -209,8 +211,6 @@ class YiPersistentAddonBackend(YiAddonBackend):
 
             if self.availability_probe is not None and availability == "unknown":
                 if runtime.get("desired_running") is True:
-                    # A transient status-check failure must not tear down a
-                    # healthy stream that is already running.
                     restored += 1
                 else:
                     pending.add(stable_id)
@@ -253,9 +253,6 @@ class YiPersistentAddonBackend(YiAddonBackend):
         }
 
     def discover(self, *, fetch_tnp: bool = True) -> dict[str, Any]:
-        # This intentionally mirrors the small discovery core from the base
-        # backend so the same authenticated manager can hand transient TNP
-        # material to PPPP_CheckDevOnline before secrets are cleared.
         manager = YiCameraManager(timeout=self.timeout)
         availability: dict[str, AvailabilityRecord] = {}
         try:
@@ -460,7 +457,8 @@ class YiPersistentAddonBackend(YiAddonBackend):
         self._availability_stop.set()
         thread = self._availability_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(self.availability_refresh_interval, 1.0) + 2.0)
+            timeout = (self.availability_probe.timeout if self.availability_probe is not None else 1.0) + 5.0
+            thread.join(timeout=timeout)
         if self.availability_probe is not None:
             self.availability_probe.clear()
         super().shutdown()
