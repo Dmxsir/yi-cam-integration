@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Minimal versioned HTTP service for the future YI Home Add-on.
+"""Versioned HTTP service for the future YI Home Add-on.
 
-This service exposes only secret-safe backend state. Native camera sessions are
-not yet launched by this process; lifecycle endpoints are present in the v1
-contract and return a controlled not-ready response until the Phase 6C runtime
-manager is attached.
+The service exposes only secret-safe backend/runtime state. When an env file is
+provided, Phase 6C.2 enables the per-camera lifecycle manager so start/stop/
+restart operations own supervised native PPPP/TNP runtimes directly.
 
 Security defaults:
 - bind to loopback by default;
@@ -29,9 +28,12 @@ from urllib.parse import urlsplit
 
 import yi_tnp_oracle as oracle
 from yi_addon_backend import YiAddonBackend
+from yi_runtime_lifecycle import YiRuntimeLifecycleManager, build_default_config
 
 CAMERA_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})$")
 STATUS_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/status$")
+START_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/start$")
+STOP_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/stop$")
 RESTART_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/restart$")
 REPROBE_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/reprobe$")
 
@@ -149,15 +151,26 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, result)
             return
 
-        match = RESTART_RE.fullmatch(path)
-        if match:
-            status, payload = self.server.backend.lifecycle_not_ready(match.group(1), "restart")
-            self._json(status, payload)
-            return
+        for regex, operation in (
+            (START_RE, "start"),
+            (STOP_RE, "stop"),
+            (RESTART_RE, "restart"),
+        ):
+            match = regex.fullmatch(path)
+            if match:
+                stable_id = match.group(1)
+                if operation == "start":
+                    status, payload = self.server.backend.start_camera(stable_id)
+                elif operation == "stop":
+                    status, payload = self.server.backend.stop_camera(stable_id)
+                else:
+                    status, payload = self.server.backend.restart_camera(stable_id)
+                self._json(status, payload)
+                return
 
         match = REPROBE_RE.fullmatch(path)
         if match:
-            status, payload = self.server.backend.lifecycle_not_ready(match.group(1), "reprobe")
+            status, payload = self.server.backend.reprobe_not_ready(match.group(1))
             self._json(status, payload)
             return
 
@@ -171,6 +184,15 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(os.getenv("YI_ADDON_PORT", "8099")))
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--no-initial-discovery", action="store_true")
+    parser.add_argument("--disable-lifecycle", action="store_true")
+    parser.add_argument("--runtime-root", type=Path)
+    parser.add_argument("--worker-dir", type=Path)
+    parser.add_argument("--runtime-state-dir", type=Path)
+    parser.add_argument("--startup-timeout", type=float, default=45.0)
+    parser.add_argument("--stall-timeout", type=float, default=12.0)
+    parser.add_argument("--terminate-grace", type=float, default=3.0)
+    parser.add_argument("--restart-delay", type=float, default=1.0)
+    parser.add_argument("--max-restart-delay", type=float, default=30.0)
     args = parser.parse_args()
 
     if args.env_file is not None:
@@ -185,7 +207,25 @@ def main() -> int:
     if not _is_loopback(args.bind) and token is None:
         raise SystemExit("non-loopback bind requires YI_ADDON_API_TOKEN")
 
-    backend = YiAddonBackend(timeout=args.timeout)
+    lifecycle: YiRuntimeLifecycleManager | None = None
+    if not args.disable_lifecycle:
+        if args.env_file is None:
+            raise SystemExit("--env-file is required unless --disable-lifecycle is used")
+        config = build_default_config(
+            env_file=args.env_file,
+            root=Path(__file__).resolve().parent,
+            runtime_root=args.runtime_root,
+            worker_dir=args.worker_dir,
+            state_dir=args.runtime_state_dir,
+            startup_timeout=args.startup_timeout,
+            stall_timeout=args.stall_timeout,
+            terminate_grace=args.terminate_grace,
+            restart_delay=args.restart_delay,
+            max_restart_delay=args.max_restart_delay,
+        )
+        lifecycle = YiRuntimeLifecycleManager(config)
+
+    backend = YiAddonBackend(timeout=args.timeout, lifecycle=lifecycle)
     if not args.no_initial_discovery:
         try:
             backend.discover(fetch_tnp=True)
@@ -214,6 +254,7 @@ def main() -> int:
                 "bind": args.bind,
                 "port": args.port,
                 "authentication": "bearer" if token is not None else "loopback_only",
+                "runtime_lifecycle_ready": lifecycle is not None,
                 "secrets_exposed": False,
             },
             separators=(",", ":"),
@@ -224,6 +265,7 @@ def main() -> int:
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
+        backend.shutdown()
         server.server_close()
     return 0
 
