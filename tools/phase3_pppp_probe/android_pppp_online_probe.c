@@ -85,7 +85,7 @@ int main(int argc, char **argv) {
     const char *library = argc > 1 ? argv[1] : "/data/local/tmp/yi-online-status/libPPPP_API.so";
     unsigned char header[12];
     char p2pid[MAX_FIELD], server[MAX_FIELD];
-    unsigned char init_string[1] = {0};
+    unsigned char init_string[12] = {0};
     int initialized = 0;
     int result_code = 1;
 
