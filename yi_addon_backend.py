@@ -113,7 +113,6 @@ class YiAddonBackend:
         try:
             return self.capability_cache.get_success(stable_id)
         except (RuntimeError, ValueError, OSError):
-            # A broken cache must never make account discovery unusable.
             return None
 
     def _runtime_for(self, stable_id: str) -> dict[str, Any] | None:
@@ -388,5 +387,7 @@ class YiAddonBackend:
             }
 
     def shutdown(self) -> None:
+        if self.capability_probe is not None:
+            self.capability_probe.shutdown()
         if self.lifecycle is not None:
             self.lifecycle.shutdown_all()
