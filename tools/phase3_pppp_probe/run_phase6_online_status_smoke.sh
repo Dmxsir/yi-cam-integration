@@ -7,11 +7,12 @@ PYTHON="${PYTHON:-python3}"
 ENV_FILE="${ENV_FILE:-$HOME/Documents/yi-cam-integration/.env.local}"
 RUNTIME="${YI_PHASE6_ONLINE_RUNTIME:-$ROOT/.analysis/phase3/bionic-root}"
 TARGET_DIR="$RUNTIME/data/local/tmp/yi-online-status"
-LIB="${YI_PPPP_LIB:-$RUNTIME/data/local/tmp/yi-phase3g/libPPPP_API.so}"
 CC="${CC:-aarch64-linux-gnu-gcc}"
 QEMU="${QEMU:-qemu-aarch64}"
 WORK="$(mktemp -d)"
 RESULT="$WORK/online-status.json"
+LIB=""
+LIB_SOURCE=""
 
 cleanup() {
   rm -rf "$WORK"
@@ -24,11 +25,80 @@ fail() {
   exit 1
 }
 
-for tool in "$CC" "$QEMU" readelf file "$PYTHON"; do
+has_online_export() {
+  local candidate="$1"
+  [[ -f "$candidate" ]] || return 1
+  readelf -Ws "$candidate" 2>/dev/null | grep -Eq '[[:space:]]PPPP_CheckDevOnline$'
+}
+
+extract_online_library_from_apk() {
+  local apk="$1"
+  local extracted="$WORK/libPPPP_API.from-current-apk.so"
+  [[ -f "$apk" ]] || return 1
+  if ! unzip -Z1 "$apk" 2>/dev/null | grep -qx 'lib/arm64-v8a/libPPPP_API.so'; then
+    return 1
+  fi
+  if ! unzip -p "$apk" 'lib/arm64-v8a/libPPPP_API.so' >"$extracted" 2>/dev/null; then
+    rm -f "$extracted"
+    return 1
+  fi
+  if ! has_online_export "$extracted"; then
+    rm -f "$extracted"
+    return 1
+  fi
+  LIB="$extracted"
+  LIB_SOURCE="current_yi_apk"
+  return 0
+}
+
+for tool in "$CC" "$QEMU" readelf file unzip "$PYTHON"; do
   if ! command -v "$tool" >/dev/null 2>&1 && [[ ! -x "$tool" ]]; then
     fail "required tool missing: $tool"
   fi
 done
+
+# PPPP_CheckDevOnline is not exported by every historical YI PPPP library.
+# Prefer an explicitly supplied library, otherwise only reuse a local library
+# when the required symbol is actually present. The fallback extracts the ARM64
+# library from the current YI Home APK without altering the proven Phase 3 media
+# runtime or its library copy.
+if [[ -n "${YI_PPPP_LIB:-}" ]]; then
+  if ! has_online_export "$YI_PPPP_LIB"; then
+    fail "YI_PPPP_LIB does not export PPPP_CheckDevOnline"
+  fi
+  LIB="$YI_PPPP_LIB"
+  LIB_SOURCE="explicit_yi_pppp_lib"
+else
+  for candidate in \
+    "$ROOT/.analysis/phase3/native/libPPPP_API.so" \
+    "$RUNTIME/data/local/tmp/yi-phase3g/libPPPP_API.so"; do
+    if has_online_export "$candidate"; then
+      LIB="$candidate"
+      LIB_SOURCE="local_export_capable_pppp"
+      break
+    fi
+  done
+
+  if [[ -z "$LIB" ]]; then
+    APK_CANDIDATES=()
+    [[ -n "${YI_APK:-}" ]] && APK_CANDIDATES+=("$YI_APK")
+    APK_CANDIDATES+=(
+      "$HOME/Documents/yi-cam-integration/YI Home .apk"
+      "$HOME/Documents/yi-cam-integration/YI Home.apk"
+      "$HOME/Documents/yi-cam-integration/.analysis/apk/base.apk"
+      "$ROOT/YI Home .apk"
+      "$ROOT/YI Home.apk"
+      "$ROOT/.analysis/apk/base.apk"
+    )
+    for apk in "${APK_CANDIDATES[@]}"; do
+      if extract_online_library_from_apk "$apk"; then
+        break
+      fi
+    done
+  fi
+fi
+
+[[ -n "$LIB" ]] || fail "no PPPP library exporting PPPP_CheckDevOnline was found; set YI_APK to the current YI Home APK"
 
 for f in \
   "$RUNTIME/system/bin/linker64" \
@@ -48,6 +118,7 @@ echo "production_modified=false"
 echo "live_view_started=false"
 echo "status_source=PPPP_CheckDevOnline"
 echo "official_check_mode=2"
+echo "pppp_library_source=$LIB_SOURCE"
 
 "$PYTHON" -m py_compile "$SRC_DIR/run_phase6_online_status_probe.py"
 echo "python_compile=PASS"
@@ -81,8 +152,8 @@ done
 chmod +x "$TARGET_DIR/android_pppp_online_probe"
 
 echo "native_online_worker_build=PASS"
-if ! readelf -Ws "$TARGET_DIR/libPPPP_API.so" | grep -q 'PPPP_CheckDevOnline'; then
-  fail "PPPP library does not export PPPP_CheckDevOnline"
+if ! has_online_export "$TARGET_DIR/libPPPP_API.so"; then
+  fail "selected PPPP library does not export PPPP_CheckDevOnline"
 fi
 echo "pppp_check_dev_online_export=PASS"
 
