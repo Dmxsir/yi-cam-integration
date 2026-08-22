@@ -26,8 +26,9 @@ Completed:
 - Phase 6C.2: per-camera runtime lifecycle manager and descendant cleanup proof.
 - Phase 6C.3: HTTP runtime control API for start/stop/restart.
 - Phase 6C.4: HTTP live reprobe, H264/AAC capability refresh, runtime resume and cleanup proof.
+- Phase 6C.5A: isolated App-owned managed go2rtc publication, media-ready producer detection, RTSP and per-camera restart proof.
 
-Active work starts at **Phase 6C.5 — App-owned media/RTSP publication**.
+Active work starts at **Phase 6C.5B — two-camera media publication + fault isolation**.
 
 ---
 
@@ -118,7 +119,7 @@ Live PTZ exit-gate proof (2026-08-23):
 
 Goal: remove all dependency on user-maintained development go2rtc stream definitions while preserving backend ownership of PPPP/TNP lifecycle.
 
-Architecture locked for the first implementation:
+Architecture locked:
 
 ```text
 per-camera Lifecycle Manager
@@ -137,19 +138,20 @@ shared App-managed go2rtc
 
 Why incoming MPEG-TS is used:
 
-- go2rtc officially supports incoming MPEG-TS through `/api/stream.ts?dst=...`.
+- go2rtc supports incoming MPEG-TS through `/api/stream.ts?dst=...`.
 - An incoming producer is not created/owned by go2rtc; the external App controls when it starts/stops.
 - This preserves Phase 6C.2 lifecycle ownership and self-healing semantics.
 - go2rtc remains one shared long-lived publisher and is not restarted for an individual camera restart.
 
-Implementation now in progress:
+Implemented reusable backend pieces:
 
 - `yi_stream_identity.py` — immutable media stream names derived only from `stable_id`.
 - `yi_media_publisher.py` — managed shared go2rtc process and generated empty-stream configuration.
-- Lifecycle manager can push supervised MPEG-TS directly to the managed publisher using chunked HTTP streaming.
+- Lifecycle manager pushes supervised MPEG-TS directly to the managed publisher using chunked HTTP streaming.
 - Backend exposes secret-safe publication metadata alongside camera/runtime state.
+- Publisher readiness distinguishes a merely registered MPEG-TS producer from a producer whose `medias` were actually detected by go2rtc.
+- Lifecycle publisher prebuffers the first MPEG-TS chunk before opening incoming HTTP ingest so go2rtc's five-second MPEG-TS probe window is spent on real transport data rather than PPPP/TNP startup.
 - Service accepts explicit managed-go2rtc binary/API/RTSP settings while keeping publisher disabled for older development smoke tests unless requested.
-- `tools/phase3_pppp_probe/run_phase6c_media_publisher_smoke.sh` provides the first isolated PTZ proof on non-production ports.
 
 Stable media identity:
 
@@ -161,24 +163,52 @@ RTSP path:   /yi_e2f22804fecd
 
 Display-name changes therefore never change media URLs or Home Assistant identity.
 
-6C.5A exit gate — isolated publisher proof:
+#### Phase 6C.5A — isolated publisher proof — COMPLETE
+
+Live PTZ exit-gate proof (2026-08-23):
+
+- Separate backend and managed go2rtc ran on isolated development ports.
+- Generated publisher contained all 7 discovered camera destination streams.
+- Production go2rtc ports `1984/8554` remained untouched.
+- HTTP camera start attached lifecycle MPEG-TS ingest.
+- go2rtc reported a registered **and media-ready** MPEG-TS producer.
+- RTSP validated H264 1920x1080 + AAC 16000 Hz mono.
+- HTTP restart changed camera runtime PID from `10651` to `10737`.
+- Shared go2rtc PID survived the camera restart unchanged.
+- The MPEG-TS producer re-registered media-ready after restart.
+- RTSP recovered with H264 + AAC.
+- Camera stop, service shutdown and managed-go2rtc cleanup passed.
+- `PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS`.
+
+Exit gate: PASS.
+
+#### Phase 6C.5B — two-camera + fault isolation — ACTIVE
+
+Validation design:
 
 - Start a separate backend + managed go2rtc on non-production ports.
-- Generated publisher contains all discovered camera destinations.
-- Start PTZ through backend HTTP.
-- Lifecycle reports media publisher attached and byte growth.
-- RTSP endpoint validates H264 1920x1080 + AAC 16 kHz mono.
-- Restart PTZ and prove the shared go2rtc PID does not change.
-- RTSP becomes valid again after the per-camera runtime restart.
-- App/service shutdown removes the managed go2rtc process.
+- Start two discovered cameras through backend HTTP.
+- Require both publications to become media-ready and validate H264 + AAC over RTSP.
+- Record both lifecycle PID/generation values and the shared go2rtc PID.
+- Locate the fault-target QEMU only by walking descendants of that camera's lifecycle PID; never use an unscoped global QEMU match.
+- Freeze only that descendant QEMU so the existing media-stall supervisor detects silence and recreates that camera session.
+- During the fault/recovery window, verify the second camera PID/generation and RTSP remain unchanged/valid.
+- Verify the shared go2rtc PID remains unchanged.
+- After recovery, require the faulted camera PID/generation to change and its producer to become media-ready again.
+- Validate H264 + AAC on both RTSP endpoints after recovery.
+- Stop both cameras and prove managed publisher cleanup at service shutdown.
 
-6C.5B final exit gate — multi-camera isolation:
+6C.5B exit gate:
 
 - Two App-managed streams operate concurrently.
-- Force-stall one selected camera.
-- Only that camera lifecycle generation changes.
+- Fault injection is scoped to one selected camera runtime.
+- Only the selected camera lifecycle generation/PID changes.
 - Shared publisher PID and second camera runtime remain unchanged.
+- Second RTSP remains valid during the selected-camera failure/recovery.
 - Both RTSP endpoints validate H264 + AAC after recovery.
+- No production configuration or production go2rtc ports are modified.
+
+Only after this passes is Phase 6C.5 complete.
 
 ### Phase 6C.6 — Backend persistence and startup policy — NEXT
 
