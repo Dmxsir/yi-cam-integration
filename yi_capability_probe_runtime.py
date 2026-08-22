@@ -6,6 +6,8 @@ native relay for a bounded duration, validates observed H264/AAC media with
 ffprobe, and only then atomically updates the capability cache.
 
 A failed probe never overwrites a previously proven capability record.
+Transient PPPP session handoff failures are retried in a bounded way because a
+reprobe may follow immediately after stopping an existing camera runtime.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,12 +41,14 @@ class CapabilityProbeResult:
     profile: str
     capability: CapabilityRecord
     duration_seconds: float
+    attempts_used: int
 
     def safe_dict(self) -> dict[str, Any]:
         return {
             "stable_id": self.stable_id,
             "profile": self.profile,
             "duration_seconds": self.duration_seconds,
+            "attempts_used": self.attempts_used,
             "capability": self.capability.safe_dict(),
             "secrets_exposed": False,
         }
@@ -114,14 +119,24 @@ class YiCapabilityProbe:
         *,
         duration_seconds: float = 8.0,
         timeout_margin_seconds: float = 45.0,
+        attempts: int = 2,
+        session_settle_seconds: float = 1.5,
+        retry_delay_seconds: float = 1.5,
     ) -> None:
         config.validate()
         if duration_seconds <= 0 or timeout_margin_seconds <= 0:
             raise ValueError("probe timing values must be greater than zero")
+        if attempts < 1 or attempts > 3:
+            raise ValueError("probe attempts must be between 1 and 3")
+        if session_settle_seconds < 0 or retry_delay_seconds < 0:
+            raise ValueError("probe handoff delays must not be negative")
         self.config = config
         self.capability_cache = capability_cache
         self.duration_seconds = float(duration_seconds)
         self.timeout_margin_seconds = float(timeout_margin_seconds)
+        self.attempts = int(attempts)
+        self.session_settle_seconds = float(session_settle_seconds)
+        self.retry_delay_seconds = float(retry_delay_seconds)
 
     def _relay_command(self, stable_id: str, output: Path) -> list[str]:
         cfg = self.config
@@ -148,42 +163,66 @@ class YiCapabilityProbe:
             str(output),
         ]
 
-    def probe(self, stable_id: str) -> CapabilityProbeResult:
+    def _run_relay_attempt(self, key: str, media_path: Path) -> None:
+        timeout = self.duration_seconds + self.timeout_margin_seconds
+        try:
+            completed = subprocess.run(
+                self._relay_command(key, media_path),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CapabilityProbeError(
+                "probe_timeout",
+                "The live camera capability probe timed out.",
+            ) from exc
+        except OSError as exc:
+            raise CapabilityProbeError(
+                "probe_spawn_failed",
+                "The live camera capability probe could not be started.",
+            ) from exc
+
+        if completed.returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
+            raise CapabilityProbeError(
+                "probe_runtime_failed",
+                "The camera did not produce valid media during the capability probe.",
+            )
+
+    def probe(self, stable_id: str, *, session_handoff: bool = False) -> CapabilityProbeResult:
         key = _stable_id(stable_id)
         probe_dir = self.config.state_dir / "probes"
         probe_dir.mkdir(parents=True, exist_ok=True)
+
+        if session_handoff and self.session_settle_seconds > 0:
+            time.sleep(self.session_settle_seconds)
 
         with tempfile.TemporaryDirectory(prefix=f"yi-probe-{key[:8]}-", dir=probe_dir) as temporary:
             work = Path(temporary)
             media_path = work / "probe.ts"
             probe_json = work / "ffprobe.json"
-            timeout = self.duration_seconds + self.timeout_margin_seconds
+            last_error: CapabilityProbeError | None = None
+            attempts_used = 0
 
-            try:
-                completed = subprocess.run(
-                    self._relay_command(key, media_path),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=timeout,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise CapabilityProbeError(
-                    "probe_timeout",
-                    "The live camera capability probe timed out.",
-                ) from exc
-            except OSError as exc:
-                raise CapabilityProbeError(
-                    "probe_spawn_failed",
-                    "The live camera capability probe could not be started.",
-                ) from exc
+            for attempt in range(1, self.attempts + 1):
+                attempts_used = attempt
+                media_path.unlink(missing_ok=True)
+                try:
+                    self._run_relay_attempt(key, media_path)
+                    last_error = None
+                    break
+                except CapabilityProbeError as exc:
+                    last_error = exc
+                    retryable = exc.category in {"probe_runtime_failed", "probe_timeout"}
+                    if attempt >= self.attempts or not retryable:
+                        raise
+                    if self.retry_delay_seconds > 0:
+                        time.sleep(self.retry_delay_seconds)
 
-            if completed.returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
-                raise CapabilityProbeError(
-                    "probe_runtime_failed",
-                    "The camera did not produce valid media during the capability probe.",
-                )
+            if last_error is not None:
+                raise last_error
 
             try:
                 with probe_json.open("wb") as output:
@@ -233,4 +272,5 @@ class YiCapabilityProbe:
                 profile=PROVEN_PROFILE,
                 capability=record,
                 duration_seconds=self.duration_seconds,
+                attempts_used=attempts_used,
             )
