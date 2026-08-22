@@ -129,13 +129,39 @@ Target endpoint:
 rtsp://<addon-host>:8554/yi_<stable-id-prefix>
 ```
 
-Implementation/exit gate:
+##### Phase 6C.5A — isolated managed publisher — COMPLETE
 
-- Shared publisher starts/stops with the backend.
-- API exposes per-camera secret-safe RTSP metadata.
-- Start/stop/restart of one camera attaches/detaches only that camera's incoming MPEG-TS producer.
+Live PTZ proof (2026-08-23) on isolated development ports:
+
+- Managed go2rtc started with all 7 discovered destination streams.
+- Production go2rtc ports `1984/8554` were untouched.
+- Lifecycle MPEG-TS ingest attached successfully.
+- go2rtc registered a media-ready MPEG-TS producer.
+- RTSP validated H264 1920x1080 + AAC 16 kHz mono.
+- Camera restart changed only the camera runtime PID (`10651` → `10737`).
+- Shared go2rtc survived the camera restart unchanged.
+- MPEG-TS producer re-registered media-ready and RTSP recovered with H264 + AAC.
+- Camera stop, service shutdown and managed publisher cleanup passed.
+- `PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS`.
+
+A go2rtc probe-timeout edge case was fixed by prebuffering the first MPEG-TS chunk before opening incoming HTTP ingest, and readiness now distinguishes a registered producer from a producer with actual detected media.
+
+Exit criteria: PASS.
+
+##### Phase 6C.5B — two-camera + fault isolation — ACTIVE
+
+Exit gate:
+
 - Two Add-on-managed RTSP streams validate H264 + AAC concurrently.
-- Force-stalling one camera recovers only that camera while go2rtc and the other stream remain alive.
+- Fault injection targets only a QEMU descendant belonging to the selected test camera runtime.
+- The selected camera is recreated by the existing media-stall supervisor/lifecycle manager.
+- Only that camera generation/PID changes.
+- Second camera PID/generation remains unchanged and its RTSP stays valid during the fault.
+- Shared go2rtc PID remains unchanged.
+- Both RTSP endpoints validate H264 + AAC after recovery.
+- Test runs on isolated backend/go2rtc ports and does not modify production configuration.
+
+Only after 6C.5B passes is Phase 6C.5 complete.
 
 #### Phase 6C.6 — Persistence/startup policy — PLANNED
 
