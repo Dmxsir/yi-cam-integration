@@ -137,9 +137,26 @@ Security/runtime rules already implemented:
 - SIGINT/SIGTERM trigger graceful HTTP shutdown.
 - Restart/reprobe routes exist in the v1 contract but return a controlled `runtime_lifecycle_not_ready` response until the lifecycle manager is attached.
 
+Live API smoke proof (2026-08-23):
+
+- Backend and HTTP service compiled successfully.
+- Service started on `127.0.0.1:18099`.
+- `GET /api/v1/health` returned successfully.
+- API returned all 7 discovered cameras.
+- One proven cached capability was visible through the API.
+- `POST /api/v1/discover` refreshed the account inventory successfully.
+- Recursive secret-field scan of API payloads passed.
+- SIGTERM graceful shutdown passed.
+- Smoke test completed with `PHASE6C_API_SMOKE=PASS`.
+
+Completed Phase 6C requirements:
+
+- Versioned secret-safe HTTP API skeleton. **PASS.**
+- Live API/discovery/cache/graceful-shutdown smoke proof. **PASS.**
+- Account/camera state exposed through reusable backend core. **PASS.**
+
 Remaining Phase 6C requirements:
 
-- Live API smoke proof.
 - Per-camera lifecycle manager that starts/stops/restarts supervised native runtimes by `stable_id`.
 - Reprobe operation wired to live capability probing and cache refresh.
 - Structured running/stalled/restarting/error runtime states.
