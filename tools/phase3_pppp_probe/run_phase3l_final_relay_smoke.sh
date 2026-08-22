@@ -182,10 +182,38 @@ done
 VALUE="$(tr -d '\r\n' <"$EXIT_MARKER")"
 echo "final_parent_exit_marker_value=${VALUE}"
 [[ "$VALUE" == "relay_exit_rc=0" ]] || { echo "final_parent_shutdown_cleanup=FAIL" >&2; exit 12; }
-! kill -0 "$RELAY_PID" 2>/dev/null || { echo "final_relay_exit_after_parent=FAIL" >&2; exit 13; }
+
+# The safe exit marker is written from the relay's finalizer immediately before
+# SystemExit. On a fast parent shutdown there is a small process-table race:
+# the marker may be visible a few milliseconds before the relay PID disappears.
+# Wait for actual process exit instead of sampling kill -0 only once.
+RELAY_GONE=0
+for tick in $(seq 1 50); do
+    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+        RELAY_GONE=1
+        echo "final_relay_exit_wait_ms=$(( (tick - 1) * 100 ))"
+        break
+    fi
+    sleep 0.1
+done
+[[ "$RELAY_GONE" == 1 ]] || { echo "final_relay_exit_after_parent=FAIL" >&2; exit 13; }
+echo "final_relay_exit_after_parent=PASS"
+
+# Direct children were captured before shutdown. Give them the same bounded
+# grace period so a normal qemu/FFmpeg exit is not mistaken for an orphan.
 for pid in "${CHILDREN[@]}"; do
-    [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null || { echo "final_orphan_child=FAIL" >&2; exit 14; }
+    [[ -z "$pid" ]] && continue
+    CHILD_GONE=0
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            CHILD_GONE=1
+            break
+        fi
+        sleep 0.1
+    done
+    [[ "$CHILD_GONE" == 1 ]] || { echo "final_orphan_child=FAIL" >&2; exit 14; }
 done
 
+echo "final_children_exit_after_parent=PASS"
 echo "final_parent_shutdown_cleanup=PASS"
 echo "PHASE3L_FINAL_RELAY=PASS"
