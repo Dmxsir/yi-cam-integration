@@ -19,6 +19,7 @@ from typing import Any
 import yi_cloud_probe as cloud
 from yi_camera_manager import CameraDevice, YiCameraManager
 from yi_capability_cache import CapabilityRecord, YiCapabilityCache
+from yi_capability_probe_runtime import CapabilityProbeError, YiCapabilityProbe
 from yi_runtime_lifecycle import YiRuntimeLifecycleManager
 
 
@@ -28,6 +29,8 @@ def _utc_now() -> str:
 
 def _safe_error(exc: Exception) -> dict[str, str]:
     if isinstance(exc, cloud.YiCloudError):
+        return {"category": exc.category, "message": exc.safe_message}
+    if isinstance(exc, CapabilityProbeError):
         return {"category": exc.category, "message": exc.safe_message}
     if isinstance(exc, (TimeoutError, OSError)):
         return {"category": "transport_error", "message": "A backend transport operation failed."}
@@ -93,15 +96,18 @@ class YiAddonBackend:
         timeout: float = 10.0,
         capability_cache: YiCapabilityCache | None = None,
         lifecycle: YiRuntimeLifecycleManager | None = None,
+        capability_probe: YiCapabilityProbe | None = None,
     ) -> None:
         self.timeout = timeout
         self.capability_cache = capability_cache or YiCapabilityCache()
         self.lifecycle = lifecycle
+        self.capability_probe = capability_probe
         self._lock = threading.RLock()
         self._cameras: dict[str, CameraState] = {}
         self._last_discovery_at: str | None = None
         self._last_error: dict[str, str] | None = None
         self._discovery_generation = 0
+        self._camera_operation_locks: dict[str, threading.RLock] = {}
 
     def _capability_for(self, stable_id: str) -> CapabilityRecord | None:
         try:
@@ -125,6 +131,14 @@ class YiAddonBackend:
                 "last_error": "Runtime status is unavailable.",
                 "secrets_exposed": False,
             }
+
+    def _operation_lock(self, stable_id: str) -> threading.RLock:
+        with self._lock:
+            lock = self._camera_operation_locks.get(stable_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._camera_operation_locks[stable_id] = lock
+            return lock
 
     def discover(self, *, fetch_tnp: bool = True) -> dict[str, Any]:
         manager = YiCameraManager(timeout=self.timeout)
@@ -158,6 +172,7 @@ class YiAddonBackend:
             "discovered_at": now,
             "generation": generation,
             "runtime_lifecycle_ready": self.lifecycle is not None,
+            "reprobe_ready": self.capability_probe is not None,
             "secrets_exposed": False,
         }
 
@@ -176,6 +191,7 @@ class YiAddonBackend:
             "discovery_generation": generation,
             "last_error": last_error,
             "runtime_lifecycle_ready": self.lifecycle is not None,
+            "reprobe_ready": self.capability_probe is not None,
             "managed_runtime_count": self.lifecycle.managed_count() if self.lifecycle is not None else 0,
             "secrets_exposed": False,
         }
@@ -231,24 +247,26 @@ class YiAddonBackend:
                 },
                 "secrets_exposed": False,
             }
-        try:
-            if operation == "start":
-                runtime = self.lifecycle.start(stable_id)
-            elif operation == "stop":
-                runtime = self.lifecycle.stop(stable_id)
-            elif operation == "restart":
-                runtime = self.lifecycle.restart(stable_id)
-            else:
-                raise ValueError("unsupported runtime operation")
-        except (RuntimeError, ValueError, OSError):
-            return 500, {
-                "ok": False,
-                "error": {
-                    "code": "runtime_operation_failed",
-                    "message": f"Camera {operation} operation failed.",
-                },
-                "secrets_exposed": False,
-            }
+
+        with self._operation_lock(stable_id):
+            try:
+                if operation == "start":
+                    runtime = self.lifecycle.start(stable_id)
+                elif operation == "stop":
+                    runtime = self.lifecycle.stop(stable_id)
+                elif operation == "restart":
+                    runtime = self.lifecycle.restart(stable_id)
+                else:
+                    raise ValueError("unsupported runtime operation")
+            except (RuntimeError, ValueError, OSError):
+                return 500, {
+                    "ok": False,
+                    "error": {
+                        "code": "runtime_operation_failed",
+                        "message": f"Camera {operation} operation failed.",
+                    },
+                    "secrets_exposed": False,
+                }
         return 200, {
             "ok": True,
             "operation": operation,
@@ -265,21 +283,110 @@ class YiAddonBackend:
     def restart_camera(self, stable_id: str) -> tuple[int, dict[str, Any]]:
         return self._runtime_operation(stable_id, "restart")
 
-    def reprobe_not_ready(self, stable_id: str) -> tuple[int, dict[str, Any]]:
+    def reprobe_camera(self, stable_id: str) -> tuple[int, dict[str, Any]]:
         if not self._camera_exists(stable_id):
             return 404, {
                 "ok": False,
                 "error": {"code": "camera_not_found", "message": "Unknown camera stable_id."},
                 "secrets_exposed": False,
             }
-        return 409, {
-            "ok": False,
-            "error": {
-                "code": "reprobe_not_ready",
-                "message": "Live capability reprobe is scheduled for Phase 6C.4.",
-            },
-            "secrets_exposed": False,
-        }
+        if self.capability_probe is None:
+            return 409, {
+                "ok": False,
+                "error": {
+                    "code": "reprobe_not_ready",
+                    "message": "The live capability probe is not enabled.",
+                },
+                "secrets_exposed": False,
+            }
+
+        with self._operation_lock(stable_id):
+            runtime_before = self._runtime_for(stable_id)
+            resume_runtime = bool(runtime_before and runtime_before.get("desired_running"))
+            if resume_runtime and self.lifecycle is not None:
+                try:
+                    self.lifecycle.stop(stable_id)
+                except (RuntimeError, ValueError, OSError):
+                    return 500, {
+                        "ok": False,
+                        "error": {
+                            "code": "reprobe_prepare_failed",
+                            "message": "The camera runtime could not be isolated for reprobe.",
+                        },
+                        "secrets_exposed": False,
+                    }
+
+            try:
+                result = self.capability_probe.probe(stable_id)
+            except CapabilityProbeError as exc:
+                resumed = None
+                if resume_runtime and self.lifecycle is not None:
+                    try:
+                        resumed = self.lifecycle.start(stable_id)
+                    except (RuntimeError, ValueError, OSError):
+                        resumed = self._runtime_for(stable_id)
+                return 502, {
+                    "ok": False,
+                    "operation": "reprobe",
+                    "error": {"code": exc.category, "message": exc.safe_message},
+                    "runtime_resumed": resume_runtime,
+                    "runtime": resumed,
+                    "secrets_exposed": False,
+                }
+            except (RuntimeError, ValueError, OSError):
+                resumed = None
+                if resume_runtime and self.lifecycle is not None:
+                    try:
+                        resumed = self.lifecycle.start(stable_id)
+                    except (RuntimeError, ValueError, OSError):
+                        resumed = self._runtime_for(stable_id)
+                return 500, {
+                    "ok": False,
+                    "operation": "reprobe",
+                    "error": {
+                        "code": "reprobe_failed",
+                        "message": "The live camera capability reprobe failed.",
+                    },
+                    "runtime_resumed": resume_runtime,
+                    "runtime": resumed,
+                    "secrets_exposed": False,
+                }
+
+            with self._lock:
+                state = self._cameras.get(stable_id)
+                if state is not None:
+                    self._cameras[stable_id] = CameraState(
+                        device=state.device,
+                        capability=result.capability,
+                    )
+
+            resumed = None
+            if resume_runtime and self.lifecycle is not None:
+                try:
+                    resumed = self.lifecycle.start(stable_id)
+                except (RuntimeError, ValueError, OSError):
+                    return 500, {
+                        "ok": False,
+                        "operation": "reprobe",
+                        "probe": result.safe_dict(),
+                        "error": {
+                            "code": "runtime_resume_failed",
+                            "message": "The capability probe passed but the camera runtime could not be resumed.",
+                        },
+                        "runtime_resumed": False,
+                        "runtime": self._runtime_for(stable_id),
+                        "secrets_exposed": False,
+                    }
+
+            return 200, {
+                "ok": True,
+                "operation": "reprobe",
+                "probe": result.safe_dict(),
+                "runtime_was_running": resume_runtime,
+                "runtime_resumed": resume_runtime,
+                "runtime": resumed if resumed is not None else self._runtime_for(stable_id),
+                "secrets_exposed": False,
+            }
 
     def shutdown(self) -> None:
         if self.lifecycle is not None:
