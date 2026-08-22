@@ -65,7 +65,7 @@ echo "=== PHASE 3F: PHONELESS NATIVE A/V ELEMENTARY STREAM CAPTURE ==="
 echo "The exact warehouse camera is opened through the proven Bionic PPPP/TNP path."
 echo "Channels 1, 2 and 3 are consumed concurrently: AAC audio + H.264 I/P video."
 echo "Raw TNP media is stored only under ignored .analysis with mode 0600."
-echo "The Linux host then decrypts/reorders H.264 and extracts AAC without transcoding."
+echo "The Linux host mirrors the APK media transforms, then frames AAC and validates both streams."
 echo "If ffprobe/ffmpeg are installed, both elementary streams are validated locally."
 echo "No ADB or USB phone is used."
 echo
@@ -77,7 +77,7 @@ readelf -d "$TARGET_DIR/android_pppp_av_capture" | grep NEEDED || true
 
 echo
 echo "--- RUN WITHOUT ADB ---"
-"$PYTHON" "$SRC_DIR/run_phase3f_av_capture.py" \
+"$PYTHON" "$SRC_DIR/run_phase3f_av_capture_v2.py" \
     --env-file "$ENV_FILE" \
     --runtime "$RUNTIME" \
     --target-dir "$TARGET_DIR" \
