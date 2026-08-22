@@ -10,6 +10,11 @@ Transient PPPP session handoff failures are retried in a bounded way because a
 reprobe may follow immediately after stopping an existing camera runtime.
 Every relay attempt owns a dedicated process group so timeout or Add-on shutdown
 cannot leave relay/QEMU/FFmpeg descendants behind.
+
+A relay that already produced media may take longer than the probe budget to
+finish its native worker shutdown. In that case the probe terminates the whole
+process group and lets ffprobe decide success from the actual captured media.
+Capability support is therefore based on observed media, not worker exit speed.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ class CapabilityProbeResult:
     capability: CapabilityRecord
     duration_seconds: float
     attempts_used: int
+    forced_shutdown_after_media: bool
 
     def safe_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +60,7 @@ class CapabilityProbeResult:
             "profile": self.profile,
             "duration_seconds": self.duration_seconds,
             "attempts_used": self.attempts_used,
+            "forced_shutdown_after_media": self.forced_shutdown_after_media,
             "capability": self.capability.safe_dict(),
             "secrets_exposed": False,
         }
@@ -239,7 +246,13 @@ class YiCapabilityProbe:
         media_path: Path,
         log_stream: BinaryIO,
         attempt: int,
-    ) -> None:
+    ) -> bool:
+        """Run one relay attempt.
+
+        Returns True when the relay exceeded the process deadline only after it
+        had already produced media. The caller must still validate that media
+        with ffprobe before treating the capability probe as successful.
+        """
         marker = (
             f"\n=== reprobe attempt {attempt}/{self.attempts}; "
             f"timeout={self.attempt_timeout_seconds:g}s ===\n"
@@ -261,14 +274,22 @@ class YiCapabilityProbe:
             ) from exc
 
         self._register(process)
+        forced_shutdown_after_media = False
         try:
             try:
                 returncode = process.wait(timeout=self.attempt_timeout_seconds)
             except subprocess.TimeoutExpired as exc:
                 self._terminate_group(process)
+                if media_path.is_file() and media_path.stat().st_size > 0:
+                    forced_shutdown_after_media = True
+                    log_stream.write(
+                        b"reprobe_attempt_timeout_after_media=true; action=ffprobe_validate\n"
+                    )
+                    log_stream.flush()
+                    return forced_shutdown_after_media
                 raise CapabilityProbeError(
                     "probe_timeout",
-                    "The live camera capability probe timed out.",
+                    "The live camera capability probe timed out before producing media.",
                 ) from exc
 
             if returncode != 0 or not media_path.is_file() or media_path.stat().st_size <= 0:
@@ -276,6 +297,7 @@ class YiCapabilityProbe:
                     "probe_runtime_failed",
                     "The camera did not produce valid media during the capability probe.",
                 )
+            return forced_shutdown_after_media
         finally:
             if process.poll() is None:
                 self._terminate_group(process)
@@ -305,6 +327,7 @@ class YiCapabilityProbe:
             probe_json = work / "ffprobe.json"
             last_error: CapabilityProbeError | None = None
             attempts_used = 0
+            forced_shutdown_after_media = False
 
             with last_log.open("wb", buffering=0) as log_stream:
                 try:
@@ -315,7 +338,9 @@ class YiCapabilityProbe:
                     attempts_used = attempt
                     media_path.unlink(missing_ok=True)
                     try:
-                        self._run_relay_attempt(key, media_path, log_stream, attempt)
+                        forced_shutdown_after_media = self._run_relay_attempt(
+                            key, media_path, log_stream, attempt
+                        )
                         last_error = None
                         break
                     except CapabilityProbeError as exc:
@@ -381,6 +406,7 @@ class YiCapabilityProbe:
                 capability=record,
                 duration_seconds=self.duration_seconds,
                 attempts_used=attempts_used,
+                forced_shutdown_after_media=forced_shutdown_after_media,
             )
 
     def shutdown(self) -> None:
