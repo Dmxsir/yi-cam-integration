@@ -181,6 +181,7 @@ def run_relay(
     resolution: int = 1,
     reorder_pending: int = 24,
     reorder_wait: float = 0.35,
+    install_apk: bool = True,
 ) -> dict[str, Any]:
     if not adb.is_file() or not apk.is_file():
         raise RuntimeError("ADB or the built oracle APK is missing")
@@ -203,7 +204,8 @@ def run_relay(
             server.settimeout(30)
 
             oracle._adb(adb, "reverse", f"tcp:{oracle.ORACLE_PORT}", f"tcp:{oracle.ORACLE_PORT}")
-            oracle._adb(adb, "install", "-r", str(apk), timeout=120)
+            if install_apk:
+                oracle._adb(adb, "install", "-r", str(apk), timeout=120)
             oracle._adb(adb, "shell", "am", "force-stop", oracle.APP_PACKAGE)
             oracle._adb(adb, "shell", "am", "start", "-n", oracle.ORACLE_COMPONENT)
 

@@ -1,2 +1,5 @@
 streams:
   yi_warehouse: 'exec:/home/asaf/Documents/yi-cam-integration/.venv/bin/python /home/asaf/Documents/yi-cam-integration/yi_production_relay.py --target מחסן --env-file /home/asaf/Documents/yi-cam-integration/.env.local --adb /usr/bin/adb --apk /home/asaf/Documents/yi-cam-integration/oracle/android/build/yi-tnp-oracle.apk --resolution 1 --stdout#killsignal=2#killtimeout=15#starttimeout=45'
+
+preload:
+  yi_warehouse: video

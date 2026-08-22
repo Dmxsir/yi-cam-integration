@@ -103,10 +103,16 @@ def _fresh_material(args: argparse.Namespace) -> tuple[oracle.CameraMaterial, di
 def supervise(args: argparse.Namespace, sink: BinaryIO) -> int:
     failures = 0
     session_number = 0
+    oracle_apk_installed = False
 
     while True:
         material: oracle.CameraMaterial | None = None
         try:
+            if not oracle_apk_installed:
+                oracle._adb(args.adb, "install", "-r", str(args.apk), timeout=120)
+                oracle_apk_installed = True
+                _log("Android oracle APK installed/refreshed for supervisor lifetime")
+
             material, preflight = _fresh_material(args)
             session_number += 1
             _log(
@@ -124,6 +130,7 @@ def supervise(args: argparse.Namespace, sink: BinaryIO) -> int:
                 args.resolution,
                 args.reorder_pending,
                 args.reorder_wait,
+                install_apk=False,
             )
 
             failures = 0
