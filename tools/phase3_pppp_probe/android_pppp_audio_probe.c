@@ -7,7 +7,16 @@
 #define MAX_UNIT 4096
 #define DRAIN_CHUNK 4096
 #define TNP_VERSION 2
+#define TNP_MEDIA_HEADER_SIZE 24
 #define CMD_SET_RESOLUTION_RESP 4882
+
+/* APK-derived com.tutk.IOTC.AVFrame codec constants. */
+#define CODEC_AAC   138
+#define CODEC_ADPCM 139
+#define CODEC_PCM   140
+#define CODEC_SPEEX 141
+#define CODEC_MP3   142
+#define CODEC_G726  143
 
 extern void *dlopen(const char *filename, int flags);
 extern void *dlsym(void *handle, const char *symbol);
@@ -113,8 +122,25 @@ static int drain_pppp(pppp_read_fn pppp_read, int handle, unsigned char channel,
     return 0;
 }
 
+static const char *audio_codec_name(uint32_t codec) {
+    switch (codec) {
+        case CODEC_AAC: return "AAC";
+        case CODEC_ADPCM: return "ADPCM";
+        case CODEC_PCM: return "PCM";
+        case CODEC_SPEEX: return "SPEEX";
+        case CODEC_MP3: return "MP3";
+        case CODEC_G726: return "G726";
+        default: return "UNKNOWN";
+    }
+}
+
+static int audio_codec_known(uint32_t codec) {
+    return codec >= CODEC_AAC && codec <= CODEC_G726;
+}
+
 static int read_audio_unit(pppp_read_fn pppp_read, int handle) {
     unsigned char outer[8];
+    unsigned char media[TNP_MEDIA_HEADER_SIZE];
     int rc = read_exact_pppp(pppp_read, handle, 1, outer, sizeof(outer));
     if (rc < 0) return 80;
 
@@ -123,11 +149,33 @@ static int read_audio_unit(pppp_read_fn pppp_read, int handle) {
     put_str("channel1_io_type="); put_u32(outer[1]);
     put_str("channel1_tnp_payload_bytes="); put_u32(data_size);
 
-    if (outer[0] != TNP_VERSION || outer[1] != 2 || data_size == 0 || data_size > 2U * 1024U * 1024U) {
+    if (outer[0] != TNP_VERSION || outer[1] != 2 || data_size < TNP_MEDIA_HEADER_SIZE ||
+        data_size > 2U * 1024U * 1024U) {
         return 81;
     }
-    if (drain_pppp(pppp_read, handle, 1, data_size) < 0) return 82;
-    return 0;
+
+    rc = read_exact_pppp(pppp_read, handle, 1, media, sizeof(media));
+    if (rc < 0) return 82;
+
+    uint32_t codec = be16(media + 0);
+    uint32_t flags = media[2];
+    uint32_t sequence = be16(media + 6);
+    uint32_t timestamp = be32(media + 12);
+    uint32_t timestamp_ms = be32(media + 20);
+    uint32_t audio_bytes = data_size - TNP_MEDIA_HEADER_SIZE;
+
+    put_str("channel1_media_header_bytes="); put_u32(TNP_MEDIA_HEADER_SIZE);
+    put_str("channel1_codec_id="); put_u32(codec);
+    put_str("channel1_codec_name="); put_str(audio_codec_name(codec)); put_str("\n");
+    put_str("channel1_flags="); put_u32(flags);
+    put_str("channel1_sequence="); put_u32(sequence);
+    put_str("channel1_timestamp="); put_u32(timestamp);
+    put_str("channel1_timestamp_ms="); put_u32(timestamp_ms);
+    put_str("channel1_audio_payload_bytes="); put_u32(audio_bytes);
+    put_str("channel1_codec_known="); put_str(audio_codec_known(codec) ? "true\n" : "false\n");
+
+    if (drain_pppp(pppp_read, handle, 1, audio_bytes) < 0) return 83;
+    return audio_codec_known(codec) ? 0 : 84;
 }
 
 int main(int argc, char **argv) {
@@ -236,6 +284,7 @@ int main(int argc, char **argv) {
     if (result_code != 0) goto cleanup;
     put_str("stage=after_channel1_first_unit\n");
     put_str("phase3e3_audio_channel=PASS\n");
+    put_str("phase3e3_audio_codec=PASS\n");
     result_code = 0;
 
 cleanup:
