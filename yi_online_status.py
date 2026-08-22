@@ -202,13 +202,15 @@ class YiOnlineStatusProbe:
             self._materials = materials
         return results
 
-    def refresh(self) -> dict[str, AvailabilityRecord]:
+    def refresh(self, stop_event: threading.Event | None = None) -> dict[str, AvailabilityRecord]:
         with self._lock:
             materials = dict(self._materials)
-        return {
-            stable_id: self._probe_material(p2pid, server)
-            for stable_id, (p2pid, server) in materials.items()
-        }
+        results: dict[str, AvailabilityRecord] = {}
+        for stable_id, (p2pid, server) in materials.items():
+            if stop_event is not None and stop_event.is_set():
+                break
+            results[stable_id] = self._probe_material(p2pid, server)
+        return results
 
     def clear(self) -> None:
         with self._lock:
