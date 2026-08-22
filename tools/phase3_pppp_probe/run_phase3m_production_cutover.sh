@@ -36,13 +36,35 @@ for f in "$PROD_CONFIG" "$ENV_FILE" "$RELAY" "$REFERENCE" \
     [[ -f "$f" ]] || fail "required file missing: $f"
 done
 
+# `systemctl show` may succeed even for a unit whose LoadState is `not-found`.
+# Inspect both scopes explicitly and select a real loaded unit, preferring the
+# one that is already active if both happen to exist.
+USER_LOAD_STATE="$(systemctl --user show "$SERVICE" -p LoadState --value 2>/dev/null || true)"
+USER_ACTIVE_STATE="$(systemctl --user show "$SERVICE" -p ActiveState --value 2>/dev/null || true)"
+SYSTEM_LOAD_STATE="$(systemctl show "$SERVICE" -p LoadState --value 2>/dev/null || true)"
+SYSTEM_ACTIVE_STATE="$(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null || true)"
+
 SERVICE_SCOPE=""
-if systemctl --user show "$SERVICE" >/dev/null 2>&1; then
+SERVICE_LOAD_STATE=""
+SERVICE_ACTIVE_STATE=""
+if [[ "$USER_LOAD_STATE" == "loaded" && "$USER_ACTIVE_STATE" == "active" ]]; then
     SERVICE_SCOPE="user"
-elif systemctl show "$SERVICE" >/dev/null 2>&1; then
+    SERVICE_LOAD_STATE="$USER_LOAD_STATE"
+    SERVICE_ACTIVE_STATE="$USER_ACTIVE_STATE"
+elif [[ "$SYSTEM_LOAD_STATE" == "loaded" && "$SYSTEM_ACTIVE_STATE" == "active" ]]; then
     SERVICE_SCOPE="system"
+    SERVICE_LOAD_STATE="$SYSTEM_LOAD_STATE"
+    SERVICE_ACTIVE_STATE="$SYSTEM_ACTIVE_STATE"
+elif [[ "$USER_LOAD_STATE" == "loaded" ]]; then
+    SERVICE_SCOPE="user"
+    SERVICE_LOAD_STATE="$USER_LOAD_STATE"
+    SERVICE_ACTIVE_STATE="$USER_ACTIVE_STATE"
+elif [[ "$SYSTEM_LOAD_STATE" == "loaded" ]]; then
+    SERVICE_SCOPE="system"
+    SERVICE_LOAD_STATE="$SYSTEM_LOAD_STATE"
+    SERVICE_ACTIVE_STATE="$SYSTEM_ACTIVE_STATE"
 else
-    fail "systemd service not found: $SERVICE"
+    fail "systemd service is not loaded in user or system scope: $SERVICE"
 fi
 
 service_is_active() {
@@ -188,6 +210,8 @@ preflight() {
     echo "production_modified=false"
     echo "service=${SERVICE}"
     echo "service_scope=${SERVICE_SCOPE}"
+    echo "service_load_state=${SERVICE_LOAD_STATE}"
+    echo "service_active_state=${SERVICE_ACTIVE_STATE}"
     echo "production_config=${PROD_CONFIG}"
     echo "candidate_relay=${RELAY}"
 
