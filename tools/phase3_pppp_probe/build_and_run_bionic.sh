@@ -20,6 +20,7 @@ for f in \
     "$RUNTIME/system/bin/linker64" \
     "$RUNTIME/system/lib64/libc.so" \
     "$RUNTIME/system/lib64/libdl.so" \
+    "$RUNTIME/system/lib64/ld-android.so" \
     "$LIB"; do
     if [[ ! -f "$f" ]]; then
         echo "ERROR: required file missing: $f" >&2
@@ -45,17 +46,20 @@ for name in libm.so libstdc++.so; do
 done
 
 # Build an Android/Bionic-targeted ARM64 executable without glibc startup code.
-# The custom _start calls main directly and exits through the AArch64 syscall ABI.
+# libc.so and libdl.so depend on loader-private symbols exported by
+# ld-android.so, so make that support DSO visible to GNU ld at link time too.
 "$CC" -nostdlib -fPIE -pie -fno-stack-protector -fno-builtin \
     -Wl,-e,_start \
     -Wl,--dynamic-linker,/system/bin/linker64 \
     -Wl,--no-as-needed \
+    -Wl,-rpath-link,"$RUNTIME/system/lib64" \
     -o "$TARGET_DIR/android_pppp_probe" \
     "$SRC_DIR/android_start.S" \
     "$SRC_DIR/android_pppp_probe.c" \
     -L"$RUNTIME/system/lib64" \
     -Wl,-l:libdl.so \
-    -Wl,-l:libc.so
+    -Wl,-l:libc.so \
+    -Wl,-l:ld-android.so
 
 chmod +x "$TARGET_DIR/android_pppp_probe"
 
@@ -69,8 +73,11 @@ file "$RUNTIME/system/bin/linker64"
 
 echo
 
-echo "--- BIONIC LIBC ---"
+echo "--- BIONIC LIBC / LOADER SUPPORT ---"
 file "$RUNTIME/system/lib64/libc.so"
+file "$RUNTIME/system/lib64/libdl.so"
+file "$RUNTIME/system/lib64/ld-android.so"
+readelf -d "$RUNTIME/system/lib64/libdl.so" | grep NEEDED || true
 readelf -V "$RUNTIME/system/lib64/libc.so" | grep -E 'Name: LIBC|Rev:' | head -20 || true
 
 echo
