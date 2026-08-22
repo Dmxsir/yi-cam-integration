@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Reusable state core for the future YI Home Add-on service.
+"""Reusable state core for the YI Home App/Add-on service.
 
-The backend owns secret-safe account discovery snapshots, proven capability
-state and (when configured) per-camera runtime lifecycle state. HTTP remains a
-separate layer in yi_addon_service.py.
-
-No secret-bearing CameraMaterial is retained here. Runtime material is resolved
-inside the selected camera process only when that runtime is started.
+The backend owns secret-safe camera discovery, capability state, per-camera
+runtime lifecycle state and optional App-owned media publication state. HTTP
+remains a separate layer in yi_addon_service.py.
 """
 
 from __future__ import annotations
@@ -20,6 +17,7 @@ import yi_cloud_probe as cloud
 from yi_camera_manager import CameraDevice, YiCameraManager
 from yi_capability_cache import CapabilityRecord, YiCapabilityCache
 from yi_capability_probe_runtime import CapabilityProbeError, YiCapabilityProbe
+from yi_media_publisher import YiGo2RTCPublisher
 from yi_runtime_lifecycle import YiRuntimeLifecycleManager
 
 
@@ -42,16 +40,25 @@ class CameraState:
     device: CameraDevice
     capability: CapabilityRecord | None
 
-    def safe_dict(self, runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+    def safe_dict(
+        self,
+        runtime: dict[str, Any] | None = None,
+        publication: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         item = self.device.safe_dict()
         item["capability"] = self.capability.safe_dict() if self.capability is not None else None
         item["capability_state"] = "proven" if self.capability is not None else "unprobed"
         if runtime is not None:
             item["runtime_state"] = runtime.get("runtime_state")
             item["runtime"] = runtime
+        item["publication"] = publication
         return item
 
-    def status_dict(self, runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+    def status_dict(
+        self,
+        runtime: dict[str, Any] | None = None,
+        publication: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         capability = self.capability
         runtime_state = runtime.get("runtime_state") if runtime is not None else "not_managed"
         return {
@@ -62,6 +69,7 @@ class CameraState:
             "transport": self.device.transport,
             "runtime_state": runtime_state,
             "runtime": runtime,
+            "publication": publication,
             "capability_state": "proven" if capability is not None else "unprobed",
             "profile": capability.profile if capability is not None else None,
             "media": (
@@ -97,15 +105,18 @@ class YiAddonBackend:
         capability_cache: YiCapabilityCache | None = None,
         lifecycle: YiRuntimeLifecycleManager | None = None,
         capability_probe: YiCapabilityProbe | None = None,
+        media_publisher: YiGo2RTCPublisher | None = None,
     ) -> None:
         self.timeout = timeout
         self.capability_cache = capability_cache or YiCapabilityCache()
         self.lifecycle = lifecycle
         self.capability_probe = capability_probe
+        self.media_publisher = media_publisher
         self._lock = threading.RLock()
         self._cameras: dict[str, CameraState] = {}
         self._last_discovery_at: str | None = None
         self._last_error: dict[str, str] | None = None
+        self._publisher_error: dict[str, str] | None = None
         self._discovery_generation = 0
         self._camera_operation_locks: dict[str, threading.RLock] = {}
 
@@ -128,6 +139,21 @@ class YiAddonBackend:
                 "process_alive": False,
                 "pid": None,
                 "last_error": "Runtime status is unavailable.",
+                "secrets_exposed": False,
+            }
+
+    def _publication_for(self, stable_id: str) -> dict[str, Any] | None:
+        if self.media_publisher is None:
+            return None
+        try:
+            item = self.media_publisher.camera_endpoint(stable_id)
+            item["publisher_ready"] = self.media_publisher.safe_status().get("ready", False)
+            return item
+        except (RuntimeError, ValueError, OSError):
+            return {
+                "configured": False,
+                "publisher_ready": False,
+                "error": "media_publication_unavailable",
                 "secrets_exposed": False,
             }
 
@@ -164,11 +190,23 @@ class YiAddonBackend:
         finally:
             manager.close()
 
+        publisher_ready = False
+        publisher_error: dict[str, str] | None = None
+        if self.media_publisher is not None:
+            try:
+                publisher_ready = bool(self.media_publisher.sync_streams(snapshot.keys()).get("ready"))
+            except (RuntimeError, ValueError, OSError):
+                publisher_error = {
+                    "category": "media_publisher_error",
+                    "message": "The managed media publisher could not be synchronized.",
+                }
+
         now = _utc_now()
         with self._lock:
             self._cameras = snapshot
             self._last_discovery_at = now
             self._last_error = None
+            self._publisher_error = publisher_error
             self._discovery_generation += 1
             generation = self._discovery_generation
 
@@ -181,6 +219,9 @@ class YiAddonBackend:
             "generation": generation,
             "runtime_lifecycle_ready": self.lifecycle is not None,
             "reprobe_ready": self.capability_probe is not None,
+            "media_publisher_enabled": self.media_publisher is not None,
+            "media_publisher_ready": publisher_ready,
+            "media_publisher_error": publisher_error,
             "secrets_exposed": False,
         }
 
@@ -190,6 +231,8 @@ class YiAddonBackend:
             last_discovery_at = self._last_discovery_at
             generation = self._discovery_generation
             last_error = dict(self._last_error) if self._last_error is not None else None
+            publisher_error = dict(self._publisher_error) if self._publisher_error is not None else None
+        publisher = self.media_publisher.safe_status() if self.media_publisher is not None else None
         return {
             "ok": True,
             "service": self.SERVICE_NAME,
@@ -201,6 +244,8 @@ class YiAddonBackend:
             "runtime_lifecycle_ready": self.lifecycle is not None,
             "reprobe_ready": self.capability_probe is not None,
             "managed_runtime_count": self.lifecycle.managed_count() if self.lifecycle is not None else 0,
+            "media_publisher": publisher,
+            "media_publisher_error": publisher_error,
             "secrets_exposed": False,
         }
 
@@ -208,7 +253,13 @@ class YiAddonBackend:
         with self._lock:
             states = list(self._cameras.values())
             last_discovery_at = self._last_discovery_at
-        cameras = [state.safe_dict(self._runtime_for(state.device.stable_id)) for state in states]
+        cameras = [
+            state.safe_dict(
+                self._runtime_for(state.device.stable_id),
+                self._publication_for(state.device.stable_id),
+            )
+            for state in states
+        ]
         return {
             "ok": True,
             "camera_count": len(cameras),
@@ -224,7 +275,7 @@ class YiAddonBackend:
             return None
         return {
             "ok": True,
-            "camera": state.safe_dict(self._runtime_for(stable_id)),
+            "camera": state.safe_dict(self._runtime_for(stable_id), self._publication_for(stable_id)),
             "secrets_exposed": False,
         }
 
@@ -233,7 +284,10 @@ class YiAddonBackend:
             state = self._cameras.get(stable_id)
         if state is None:
             return None
-        return {"ok": True, "status": state.status_dict(self._runtime_for(stable_id))}
+        return {
+            "ok": True,
+            "status": state.status_dict(self._runtime_for(stable_id), self._publication_for(stable_id)),
+        }
 
     def _camera_exists(self, stable_id: str) -> bool:
         with self._lock:
@@ -279,6 +333,7 @@ class YiAddonBackend:
             "ok": True,
             "operation": operation,
             "runtime": runtime,
+            "publication": self._publication_for(stable_id),
             "secrets_exposed": False,
         }
 
@@ -335,6 +390,7 @@ class YiAddonBackend:
                     "runtime_was_running": resume_runtime,
                     "runtime_resumed": resumed_ok,
                     "runtime": resumed,
+                    "publication": self._publication_for(stable_id),
                     "secrets_exposed": False,
                 }
             except (RuntimeError, ValueError, OSError):
@@ -349,16 +405,14 @@ class YiAddonBackend:
                     "runtime_was_running": resume_runtime,
                     "runtime_resumed": resumed_ok,
                     "runtime": resumed,
+                    "publication": self._publication_for(stable_id),
                     "secrets_exposed": False,
                 }
 
             with self._lock:
                 state = self._cameras.get(stable_id)
                 if state is not None:
-                    self._cameras[stable_id] = CameraState(
-                        device=state.device,
-                        capability=result.capability,
-                    )
+                    self._cameras[stable_id] = CameraState(device=state.device, capability=result.capability)
 
             resumed_ok, resumed = self._resume_runtime_after_reprobe(stable_id, resume_runtime)
             if resume_runtime and not resumed_ok:
@@ -373,6 +427,7 @@ class YiAddonBackend:
                     "runtime_was_running": True,
                     "runtime_resumed": False,
                     "runtime": resumed,
+                    "publication": self._publication_for(stable_id),
                     "secrets_exposed": False,
                 }
 
@@ -383,6 +438,7 @@ class YiAddonBackend:
                 "runtime_was_running": resume_runtime,
                 "runtime_resumed": resumed_ok if resume_runtime else False,
                 "runtime": resumed,
+                "publication": self._publication_for(stable_id),
                 "secrets_exposed": False,
             }
 
@@ -391,3 +447,5 @@ class YiAddonBackend:
             self.capability_probe.shutdown()
         if self.lifecycle is not None:
             self.lifecycle.shutdown_all()
+        if self.media_publisher is not None:
+            self.media_publisher.stop()
