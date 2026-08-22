@@ -21,8 +21,10 @@ Completed:
 - Phase 6A: generic account discovery by secret-safe `stable_id`.
 - Phase 6B: generic runtime path, cross-model proof, capability/profile cache.
 - Phase 6C.1: versioned secret-safe Add-on backend/API skeleton and live smoke proof.
+- Phase 6C.2: per-camera runtime lifecycle manager and descendant cleanup proof.
+- Phase 6C.3: HTTP runtime control API for start/stop/restart.
 
-Active work starts at **Phase 6C.2**.
+Active work starts at **Phase 6C.4 — live reprobe + capability refresh**.
 
 ---
 
@@ -44,21 +46,21 @@ Implemented:
 
 Live smoke result: `PHASE6C_API_SMOKE=PASS`.
 
-### Phase 6C.2 — Per-camera runtime lifecycle manager — ACTIVE
+### Phase 6C.2 — Per-camera runtime lifecycle manager — COMPLETE
 
 Goal: make the Add-on backend, not go2rtc preload configuration, own the lifetime of each supervised PPPP/TNP runtime.
 
-Implementation requirements:
+Implemented:
 
 - One independent runtime controller per `stable_id`.
 - Start a camera through the generic stable-id relay path.
 - Stop only the selected camera and its descendants.
 - Restart only the selected camera.
 - Preserve the existing media-stall supervisor behavior.
-- If the supervisor exits because of a stall, the lifecycle manager recreates that camera runtime.
-- Bounded restart delay/backoff to prevent hot restart loops.
+- Supervisor exit causes lifecycle recreation while desired state remains running.
+- Bounded restart delay/backoff prevents hot restart loops.
 - Graceful global shutdown stops every managed camera.
-- No camera secrets in lifecycle status or logs produced by the API.
+- Secret-safe runtime status.
 
 Runtime states:
 
@@ -71,16 +73,18 @@ stopping
 error
 ```
 
-Exit gate:
+Live PTZ exit-gate proof (2026-08-23):
 
-- Start a non-production camera by `stable_id` through the service.
-- Confirm a live supervised native process exists.
-- API status reports `running`.
-- Restart changes the runtime process without affecting other cameras.
-- Stop removes the runtime cleanly.
-- Service SIGTERM leaves no relay/QEMU/FFmpeg descendants.
+- HTTP start reached `running`.
+- Native media readers and mux startup were observed.
+- Restart changed lifecycle PID from `7373` to `7422`.
+- Stop removed the selected runtime cleanly.
+- Service SIGTERM left no relay descendants.
+- `PHASE6C_LIFECYCLE_SMOKE=PASS`.
 
-### Phase 6C.3 — Runtime control API — NEXT
+Exit gate: PASS.
+
+### Phase 6C.3 — Runtime control API — COMPLETE
 
 API operations:
 
@@ -90,35 +94,39 @@ POST /api/v1/cameras/{stable_id}/stop
 POST /api/v1/cameras/{stable_id}/restart
 ```
 
-Requirements:
+Implemented:
 
 - Idempotent start/stop behavior.
 - `404` for unknown `stable_id`.
 - Structured state returned after each operation.
-- Concurrent requests for one camera serialized safely.
-- One camera failure does not block other camera API operations.
+- Per-camera backend operation locks serialize control/reprobe requests for the same camera.
+- Independent camera controllers prevent one camera failure from blocking another camera lifecycle.
 
-Exit gate:
+Exit gate: start/status/restart/stop passed through HTTP in `PHASE6C_LIFECYCLE_SMOKE=PASS`.
 
-- Start/status/restart/stop smoke test passes through HTTP only.
-
-### Phase 6C.4 — Reprobe + capability refresh — NEXT
+### Phase 6C.4 — Reprobe + capability refresh — ACTIVE
 
 Goal: make `POST /api/v1/cameras/{stable_id}/reprobe` a real operation.
 
-Requirements:
+Implemented so far:
 
-- Stop or isolate the selected runtime safely when required.
-- Run bounded live capability/profile probe.
-- Validate observed H264/AAC media.
-- Atomically update capability cache only on proof success.
-- Preserve previous proven cache record if the new probe fails.
-- Return secret-safe probe result and failure category.
-- Resume prior runtime state after reprobe when appropriate.
+- `yi_capability_probe_runtime.py` reusable bounded live-probe core.
+- Running camera is stopped/isolated before reprobe.
+- Probe runs by `stable_id`, not display name/model whitelist.
+- H264 + AAC are validated before cache update.
+- Capability cache is updated atomically only on successful proof.
+- Previous proven cache record is not overwritten by a failed probe.
+- Secret-safe failure categories are returned.
+- Prior desired-running state is restored after the probe.
+- `tools/phase3_pppp_probe/run_phase6c_reprobe_smoke.sh` uses an isolated temporary capability cache for live validation.
 
-Exit gate:
+Exit gate pending live proof:
 
-- HTTP reprobe updates `observed_at` for a known camera and the camera resumes streaming.
+- Start PTZ through HTTP.
+- HTTP reprobe succeeds and writes capability source `addon_api_reprobe`.
+- Capability media reports H264 + AAC.
+- PTZ resumes `running` with a new runtime PID.
+- Stop/shutdown remain clean.
 
 ### Phase 6C.5 — Add-on-owned media publication — NEXT
 
