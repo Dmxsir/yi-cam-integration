@@ -2,15 +2,20 @@
 """Phase 3H pipe adapter for yi_native_av_relay.
 
 The finite Phase 3G file smoke proved that the decoded H264+AAC streams mux
-correctly, but a continuous pipe exposed a different problem: FFmpeg's normal
-raw-input probing can wait for a large amount of data when there is no EOF.
-That is harmless for a finite capture and fatal for an exec producer whose
-consumer is waiting for the first MPEG-TS byte.
+correctly, but a continuous pipe exposed two independent live-stream issues:
 
-This adapter keeps the proven PPPP/TNP/media path unchanged, gives FFmpeg small
-bounded probe windows for the already-known H264 and ADTS/AAC inputs, raises
-its input queues, forces packet flushing, and explicitly pumps MPEG-TS stdout
-to the parent stdout. Diagnostics stay on stderr.
+1. FFmpeg's normal raw-input probing can wait for a large amount of data when
+   there is no EOF.
+2. The raw H264 packets reach the MPEG-TS muxer without timestamps. go2rtc can
+   discover the tracks from the first TS packets, but RTP delivery needs a
+   monotonic timestamp timeline for each access unit.
+
+This adapter keeps the proven PPPP/TNP/media path unchanged. For the continuous
+stdout path only it gives FFmpeg bounded probe windows, explicit packet PTS/DTS
+and durations using the already-proven 20 fps video cadence and AAC-LC
+1024/16000 = 64 ms cadence, raises input queues, forces packet flushing, and
+explicitly pumps MPEG-TS stdout to the parent stdout. Diagnostics stay on
+stderr.
 """
 
 from __future__ import annotations
@@ -25,6 +30,28 @@ import yi_native_av_relay as base
 
 _ORIGINAL_START_FFMPEG = base.start_ffmpeg
 _PUMPS: list[threading.Thread] = []
+
+MPEGTS_TIME_BASE = 90000
+VIDEO_TICKS = MPEGTS_TIME_BASE // base.VIDEO_FPS  # 4500 ticks = 50 ms
+AAC_SAMPLE_RATE = 16000
+AAC_SAMPLES_PER_FRAME = 1024
+AUDIO_TICKS = MPEGTS_TIME_BASE * AAC_SAMPLES_PER_FRAME // AAC_SAMPLE_RATE  # 5760 = 64 ms
+
+
+def _setts(kind: str, start_ms: int) -> str:
+    start_ticks = int(start_ms) * MPEGTS_TIME_BASE // 1000
+    if kind == "video":
+        step = VIDEO_TICKS
+    elif kind == "audio":
+        step = AUDIO_TICKS
+    else:
+        raise ValueError(kind)
+    return (
+        "setts=time_base=1/90000:"
+        f"pts=N*{step}+{start_ticks}:"
+        f"dts=N*{step}+{start_ticks}:"
+        f"duration={step}"
+    )
 
 
 def _start_ffmpeg_with_explicit_stdout(
@@ -47,20 +74,22 @@ def _start_ffmpeg_with_explicit_stdout(
         "-thread_queue_size", "512",
         "-probesize", "262144",
         "-analyzeduration", "500000",
-        "-fflags", "+genpts+nobuffer",
+        "-fflags", "+nobuffer",
+        "-r", str(base.VIDEO_FPS),
+        "-f", "h264",
+        "-i", f"pipe:{video_r}",
     ]
-    if video_offset_ms:
-        video_opts += ["-itsoffset", f"{video_offset_ms / 1000:.3f}"]
-    video_opts += ["-r", str(base.VIDEO_FPS), "-f", "h264", "-i", f"pipe:{video_r}"]
 
     audio_opts = [
         "-thread_queue_size", "512",
         "-probesize", "32768",
         "-analyzeduration", "200000",
+        "-f", "aac",
+        "-i", f"pipe:{audio_r}",
     ]
-    if audio_offset_ms:
-        audio_opts += ["-itsoffset", f"{audio_offset_ms / 1000:.3f}"]
-    audio_opts += ["-f", "aac", "-i", f"pipe:{audio_r}"]
+
+    video_setts = _setts("video", video_offset_ms)
+    audio_setts = _setts("audio", audio_offset_ms)
 
     command = [
         ffmpeg,
@@ -72,6 +101,8 @@ def _start_ffmpeg_with_explicit_stdout(
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-c", "copy",
+        "-bsf:v", video_setts,
+        "-bsf:a", audio_setts,
         "-flush_packets", "1",
         "-muxdelay", "0",
         "-muxpreload", "0",
@@ -84,6 +115,11 @@ def _start_ffmpeg_with_explicit_stdout(
         "mpegts_streaming_probe_tuning="
         "video_probe_262144/video_analyze_500ms/"
         "audio_probe_32768/audio_analyze_200ms/thread_queue_512/flush_packets"
+    )
+    base.log(
+        "mpegts_timestamp_mode=SETTS_90KHZ; "
+        f"video_step_ticks={VIDEO_TICKS}; audio_step_ticks={AUDIO_TICKS}; "
+        f"video_offset_ms={video_offset_ms}; audio_offset_ms={audio_offset_ms}"
     )
 
     try:
@@ -113,6 +149,7 @@ def _start_ffmpeg_with_explicit_stdout(
     def pump() -> None:
         total = 0
         first = True
+        next_report = 1024 * 1024
         try:
             while True:
                 chunk = os.read(ts_r, 65536)
@@ -127,6 +164,9 @@ def _start_ffmpeg_with_explicit_stdout(
                 sys.stdout.buffer.write(chunk)
                 sys.stdout.buffer.flush()
                 total += len(chunk)
+                if total >= next_report:
+                    base.log(f"mpegts_stdout_progress_bytes={total}")
+                    next_report += 1024 * 1024
         except BrokenPipeError:
             base.log("mpegts_stdout_consumer_closed=true")
         finally:
