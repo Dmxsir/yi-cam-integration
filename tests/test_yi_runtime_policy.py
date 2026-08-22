@@ -4,6 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from yi_persistent_backend import YiPersistentAddonBackend
 from yi_runtime_policy import YiRuntimePolicyStore
@@ -20,6 +21,17 @@ class _FakeLifecycle:
     def start(self, stable_id: str):
         self.started.append(stable_id)
         return {"stable_id": stable_id, "desired_running": True}
+
+
+class _FailingCameraManager:
+    def __init__(self, *, timeout: float) -> None:
+        self.timeout = timeout
+
+    def discover(self, *, fetch_tnp: bool = True):
+        raise TimeoutError("simulated cloud outage")
+
+    def close(self) -> None:
+        return
 
 
 class RuntimePolicyStoreTests(unittest.TestCase):
@@ -57,6 +69,20 @@ class RuntimePolicyStoreTests(unittest.TestCase):
             self.assertEqual(result["restored_count"], 1)
             self.assertEqual(result["pending_count"], 1)
             self.assertEqual(backend._restore_pending, {CAMERA_B})
+
+    def test_cloud_discovery_failure_does_not_clear_pending_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = YiRuntimePolicyStore(Path(temporary) / "runtime-policy.json")
+            store.set_desired_running(CAMERA_A, True)
+            backend = YiPersistentAddonBackend(runtime_policy=store, lifecycle=_FakeLifecycle())
+
+            with patch("yi_addon_backend.YiCameraManager", _FailingCameraManager):
+                with self.assertRaises(TimeoutError):
+                    backend.discover(fetch_tnp=True)
+
+            self.assertEqual(store.desired_running_ids(), (CAMERA_A,))
+            self.assertEqual(backend._restore_pending, {CAMERA_A})
+            self.assertEqual(backend._last_error["category"], "transport_error")
 
 
 if __name__ == "__main__":
