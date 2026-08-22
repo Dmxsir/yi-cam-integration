@@ -152,6 +152,24 @@ class YiGo2RTCPublisher:
             if isinstance(producer, dict) and producer.get("format_name") == "mpegts"
         )
 
+    @staticmethod
+    def _ready_mpegts_producers(snapshot: dict[str, Any] | None) -> int:
+        if not isinstance(snapshot, dict):
+            return 0
+        producers = snapshot.get("producers")
+        if not isinstance(producers, list):
+            return 0
+        return sum(
+            1
+            for producer in producers
+            if (
+                isinstance(producer, dict)
+                and producer.get("format_name") == "mpegts"
+                and isinstance(producer.get("medias"), list)
+                and len(producer["medias"]) > 0
+            )
+        )
+
     def _stop_locked(self) -> None:
         process = self._process
         self._process = None
@@ -254,6 +272,7 @@ class YiGo2RTCPublisher:
             configured = key in self._stable_ids
         snapshot = self._stream_snapshot(stream) if configured else None
         producer_count = self._registered_mpegts_producers(snapshot)
+        ready_producer_count = self._ready_mpegts_producers(snapshot)
         return {
             "stream_name": stream,
             "rtsp_path": media_rtsp_path(key),
@@ -261,6 +280,8 @@ class YiGo2RTCPublisher:
             "configured": configured,
             "producer_registered": producer_count > 0,
             "mpegts_producer_count": producer_count,
+            "producer_media_ready": ready_producer_count > 0,
+            "mpegts_ready_producer_count": ready_producer_count,
             "secrets_exposed": False,
         }
 
