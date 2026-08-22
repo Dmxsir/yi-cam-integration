@@ -31,6 +31,7 @@ from typing import BinaryIO
 import yi_native_av_relay as base
 
 _ORIGINAL_START_FFMPEG = base.start_ffmpeg
+_ORIGINAL_BASE_LOG = base.log
 _PUMPS: list[threading.Thread] = []
 _STDOUT_CONSUMER_CLOSED = threading.Event()
 
@@ -39,6 +40,26 @@ VIDEO_TICKS = MPEGTS_TIME_BASE // base.VIDEO_FPS  # 4500 ticks = 50 ms
 AAC_SAMPLE_RATE = 16000
 AAC_SAMPLES_PER_FRAME = 1024
 AUDIO_TICKS = MPEGTS_TIME_BASE * AAC_SAMPLES_PER_FRAME // AAC_SAMPLE_RATE  # 5760 = 64 ms
+
+
+def _safe_log(message: str) -> None:
+    """Keep parent-pipe shutdown from turning diagnostics into relay failure.
+
+    go2rtc owns the relay stderr pipe. During parent shutdown that pipe can be
+    closed before base.main() finishes native cleanup and emits its final safe
+    status lines. Logging is diagnostic-only, so EPIPE/closed-stderr must not
+    change the media/native shutdown return code.
+    """
+    try:
+        _ORIGINAL_BASE_LOG(message)
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+
+
+# base.main() resolves its module-global log function at runtime, so replacing
+# it here makes all of its normal diagnostic calls best-effort for exec/pipe
+# parent shutdown without changing the PPPP/TNP lifecycle itself.
+base.log = _safe_log
 
 
 def _setts(kind: str, start_ms: int) -> str:
