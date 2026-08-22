@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Per-camera supervised runtime lifecycle manager for the YI Home Add-on.
+"""Per-camera supervised runtime lifecycle manager for the YI Home App/Add-on.
 
-The lifecycle manager is the Add-on-owned replacement for relying on go2rtc
-preload entries to recreate a failed native PPPP/TNP producer. Each camera is
-managed independently by secret-safe stable_id.
-
-For Phase 6C.2 the supervised MPEG-TS output is intentionally drained to
-/dev/null. Phase 6C.5 will attach the Add-on-owned media publisher to this
-output. This separation lets lifecycle/start/stop/restart semantics be proven
-before media publication ownership is moved.
+Each camera is owned independently by secret-safe stable_id. The native
+PPPP/TNP relay remains behind the existing media-stall supervisor. When a media
+publisher is configured, supervised MPEG-TS is streamed into the App-owned
+go2rtc incoming MPEG-TS endpoint; otherwise output is drained for development
+lifecycle tests.
 """
 
 from __future__ import annotations
 
+import http.client
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -22,9 +19,10 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+from urllib.parse import quote
 
-STABLE_ID_RE = re.compile(r"^[0-9a-f]{20}$")
+from yi_stream_identity import media_stream_name, normalize_stable_id
 
 
 def _utc_now() -> str:
@@ -38,13 +36,6 @@ def default_runtime_state_dir() -> Path:
     state_home = os.getenv("XDG_STATE_HOME")
     base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
     return base / "yi-cam-integration" / "runtime"
-
-
-def _stable_id(value: str) -> str:
-    normalized = value.strip().casefold()
-    if not STABLE_ID_RE.fullmatch(normalized):
-        raise ValueError("stable_id must be exactly 20 lowercase hexadecimal characters")
-    return normalized
 
 
 @dataclass(frozen=True)
@@ -64,6 +55,9 @@ class RuntimeLifecycleConfig:
     terminate_grace: float = 3.0
     restart_delay: float = 1.0
     max_restart_delay: float = 30.0
+    media_ingest_host: str | None = None
+    media_ingest_port: int | None = None
+    media_ingest_timeout: float = 5.0
 
     def validate(self) -> None:
         if not Path(self.python).is_file():
@@ -83,11 +77,21 @@ class RuntimeLifecycleConfig:
             raise RuntimeError("runtime timeouts must be greater than zero")
         if self.terminate_grace <= 0 or self.restart_delay < 0 or self.max_restart_delay <= 0:
             raise RuntimeError("runtime lifecycle timing configuration is invalid")
+        if (self.media_ingest_host is None) != (self.media_ingest_port is None):
+            raise RuntimeError("media ingest host and port must be configured together")
+        if self.media_ingest_port is not None and not 1 <= self.media_ingest_port <= 65535:
+            raise RuntimeError("media ingest port must be between 1 and 65535")
+        if self.media_ingest_timeout <= 0:
+            raise RuntimeError("media ingest timeout must be greater than zero")
+
+    @property
+    def media_publisher_enabled(self) -> bool:
+        return self.media_ingest_host is not None and self.media_ingest_port is not None
 
 
 class _CameraRuntimeController:
     def __init__(self, stable_id: str, config: RuntimeLifecycleConfig) -> None:
-        self.stable_id = _stable_id(stable_id)
+        self.stable_id = normalize_stable_id(stable_id)
         self.config = config
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -103,6 +107,9 @@ class _CameraRuntimeController:
         self.last_reason: str | None = None
         self.started_at: str | None = None
         self.updated_at = _utc_now()
+        self.publisher_connected = False
+        self.published_bytes = 0
+        self.publisher_error: str | None = None
 
     @property
     def log_path(self) -> Path:
@@ -131,7 +138,11 @@ class _CameraRuntimeController:
                 "last_error": self.last_error,
                 "started_at": self.started_at,
                 "updated_at": self.updated_at,
-                "media_publisher_attached": False,
+                "media_publisher_enabled": self.config.media_publisher_enabled,
+                "media_publisher_attached": bool(self.publisher_connected and process_alive),
+                "published_bytes": self.published_bytes,
+                "publisher_error": self.publisher_error,
+                "stream_name": media_stream_name(self.stable_id),
                 "secrets_exposed": False,
             }
 
@@ -187,6 +198,68 @@ class _CameraRuntimeController:
         except subprocess.TimeoutExpired:
             pass
 
+    def _publish_mpegts(self, stream: BinaryIO, process: subprocess.Popen[bytes]) -> None:
+        cfg = self.config
+        assert cfg.media_ingest_host is not None and cfg.media_ingest_port is not None
+        connection: http.client.HTTPConnection | None = None
+        try:
+            connection = http.client.HTTPConnection(
+                cfg.media_ingest_host,
+                cfg.media_ingest_port,
+                timeout=cfg.media_ingest_timeout,
+            )
+            path = "/api/stream.ts?dst=" + quote(media_stream_name(self.stable_id), safe="")
+            connection.putrequest("POST", path)
+            connection.putheader("Content-Type", "video/mp2t")
+            connection.putheader("Transfer-Encoding", "chunked")
+            connection.putheader("Cache-Control", "no-store")
+            connection.endheaders()
+            with self.lock:
+                self.publisher_connected = True
+                self.publisher_error = None
+                self.updated_at = _utc_now()
+
+            while not self.stop_event.is_set():
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                connection.send(f"{len(chunk):X}\r\n".encode("ascii"))
+                connection.send(chunk)
+                connection.send(b"\r\n")
+                with self.lock:
+                    self.published_bytes += len(chunk)
+                    self.updated_at = _utc_now()
+
+            try:
+                connection.send(b"0\r\n\r\n")
+                response = connection.getresponse()
+                response.read(1024)
+                if response.status >= 400:
+                    raise OSError("go2rtc ingest rejected MPEG-TS producer")
+            except (OSError, http.client.HTTPException):
+                if not self.stop_event.is_set():
+                    raise
+        except (OSError, http.client.HTTPException):
+            with self.lock:
+                self.publisher_error = "media_publish_failed"
+                self.publisher_connected = False
+                self.updated_at = _utc_now()
+            if not self.stop_event.is_set() and process.poll() is None:
+                self._terminate_process(process)
+        finally:
+            with self.lock:
+                self.publisher_connected = False
+                self.updated_at = _utc_now()
+            try:
+                stream.close()
+            except OSError:
+                pass
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+
     def _run(self) -> None:
         first_launch = True
         consecutive_restarts = 0
@@ -195,15 +268,19 @@ class _CameraRuntimeController:
                 with self.lock:
                     if not self.desired_running:
                         break
+                    self.publisher_connected = False
+                    self.published_bytes = 0
+                    self.publisher_error = None
                 self._set_state("starting" if first_launch else "restarting")
                 self.config.state_dir.mkdir(parents=True, exist_ok=True)
+                pump_thread: threading.Thread | None = None
                 try:
                     log_stream = self.log_path.open("ab", buffering=0)
                     try:
                         process = subprocess.Popen(
                             self._command(),
                             stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
+                            stdout=(subprocess.PIPE if self.config.media_publisher_enabled else subprocess.DEVNULL),
                             stderr=log_stream,
                             start_new_session=True,
                         )
@@ -220,6 +297,22 @@ class _CameraRuntimeController:
                         self.desired_running = False
                     break
 
+                if self.config.media_publisher_enabled:
+                    if process.stdout is None:
+                        log_stream.close()
+                        self._terminate_process(process)
+                        self._set_state("error", reason="publisher_pipe_failed", error="Media publisher pipe is unavailable.")
+                        with self.lock:
+                            self.desired_running = False
+                        break
+                    pump_thread = threading.Thread(
+                        target=self._publish_mpegts,
+                        args=(process.stdout, process),
+                        name=f"yi-publish-{self.stable_id[:8]}",
+                        daemon=True,
+                    )
+                    pump_thread.start()
+
                 launched_mono = time.monotonic()
                 with self.lock:
                     self.process = process
@@ -233,11 +326,19 @@ class _CameraRuntimeController:
                 first_launch = False
 
                 rc = process.wait()
+                if process.stdout is not None:
+                    try:
+                        process.stdout.close()
+                    except OSError:
+                        pass
+                if pump_thread is not None and pump_thread is not threading.current_thread():
+                    pump_thread.join(timeout=self.config.media_ingest_timeout + 2.0)
                 log_stream.close()
                 runtime_seconds = time.monotonic() - launched_mono
                 with self.lock:
                     self.process = None
                     self.pid = None
+                    self.publisher_connected = False
                     self.last_exit_code = rc
                     should_continue = self.desired_running and not self.stop_event.is_set()
 
@@ -248,7 +349,10 @@ class _CameraRuntimeController:
                 with self.lock:
                     self.restart_count += 1
                     self.state = "restarting"
-                    self.last_reason = "media_stall" if rc == 75 else "runtime_exit"
+                    if self.publisher_error is not None:
+                        self.last_reason = "publisher_disconnect"
+                    else:
+                        self.last_reason = "media_stall" if rc == 75 else "runtime_exit"
                     self.updated_at = _utc_now()
 
                 delay = min(
@@ -265,6 +369,7 @@ class _CameraRuntimeController:
             with self.lock:
                 self.process = None
                 self.pid = None
+                self.publisher_connected = False
                 if self.state != "error":
                     self.state = "stopped"
                     self.last_reason = "stopped"
@@ -302,7 +407,7 @@ class _CameraRuntimeController:
         if process is not None and process.poll() is None:
             self._terminate_process(process)
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=self.config.terminate_grace + 8.0)
+            thread.join(timeout=self.config.terminate_grace + self.config.media_ingest_timeout + 8.0)
         with self.lock:
             if self.thread is thread and (thread is None or not thread.is_alive()):
                 self.thread = None
@@ -334,7 +439,7 @@ class YiRuntimeLifecycleManager:
         self._controllers: dict[str, _CameraRuntimeController] = {}
 
     def _controller(self, stable_id: str) -> _CameraRuntimeController:
-        key = _stable_id(stable_id)
+        key = normalize_stable_id(stable_id)
         with self._lock:
             controller = self._controllers.get(key)
             if controller is None:
@@ -352,7 +457,7 @@ class YiRuntimeLifecycleManager:
         return self._controller(stable_id).restart()
 
     def status(self, stable_id: str) -> dict[str, Any]:
-        key = _stable_id(stable_id)
+        key = normalize_stable_id(stable_id)
         with self._lock:
             controller = self._controllers.get(key)
         if controller is None:
@@ -369,7 +474,11 @@ class YiRuntimeLifecycleManager:
                 "last_error": None,
                 "started_at": None,
                 "updated_at": None,
+                "media_publisher_enabled": self.config.media_publisher_enabled,
                 "media_publisher_attached": False,
+                "published_bytes": 0,
+                "publisher_error": None,
+                "stream_name": media_stream_name(key),
                 "secrets_exposed": False,
             }
         return controller.safe_status()
@@ -402,6 +511,9 @@ def build_default_config(
     terminate_grace: float = 3.0,
     restart_delay: float = 1.0,
     max_restart_delay: float = 30.0,
+    media_ingest_host: str | None = None,
+    media_ingest_port: int | None = None,
+    media_ingest_timeout: float = 5.0,
 ) -> RuntimeLifecycleConfig:
     project_root = (root or Path(__file__).resolve().parent).resolve()
     selected_runtime = (runtime_root or project_root / ".analysis" / "phase3" / "bionic-root").resolve()
@@ -421,4 +533,7 @@ def build_default_config(
         terminate_grace=terminate_grace,
         restart_delay=restart_delay,
         max_restart_delay=max_restart_delay,
+        media_ingest_host=media_ingest_host,
+        media_ingest_port=media_ingest_port,
+        media_ingest_timeout=media_ingest_timeout,
     )
