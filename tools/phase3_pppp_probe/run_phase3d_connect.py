@@ -25,6 +25,13 @@ import yi_cloud_probe as cloud
 import yi_tnp_oracle as oracle
 
 
+# This server-model mapping was already established for the approved YI 1080p
+# Home / y291ga path during the earlier APK/cloud analysis. Keep it here so the
+# Phase 3 worktree does not depend on ignored .analysis APK feature_config
+# assets merely to recognize the already-proven exact target.
+PROVEN_SERVER_MODEL_MAP = {"83": "y291ga"}
+
+
 def _required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -35,11 +42,11 @@ def _required_env(name: str) -> str:
 def _fresh_exact_target(target: str, timeout: float = 10.0) -> tuple[oracle.CameraMaterial, dict[str, Any]]:
     """Fetch fresh PPPP material for exactly one named camera, with no fallback.
 
-    Phase 2C's shared helper intentionally allows an approved fallback camera and
-    historically required the raw cloud model to equal ``83``. Phase 3D must be
-    stricter about identity but more tolerant of equivalent cloud model encoding:
-    the exact name must match, the normalized model must still be y291ga, the
-    transport must still be type-2/TNP, and the camera must be online.
+    Phase 2C's shared helper intentionally allows an approved fallback camera.
+    Phase 3D instead requires the exact requested name, online type-2/TNP, and
+    the already-proven y291ga identity. For raw server model 83 the established
+    mapping is used directly so ignored local APK-analysis assets are not a
+    runtime dependency of the Linux probe.
     """
 
     region = os.getenv("YI_REGION", "eu").casefold()
@@ -97,13 +104,16 @@ def _fresh_exact_target(target: str, timeout: float = 10.0) -> tuple[oracle.Came
         raise RuntimeError(f"Exact Phase 3D target {target!r} was not found; fallback refused")
 
     raw_model = str(selected.get("model", ""))
-    normalized = cloud.normalize_model(selected.get("model"), selected.get("did"))
+    asset_normalized = cloud.normalize_model(selected.get("model"), selected.get("did"))
+    normalized = PROVEN_SERVER_MODEL_MAP.get(raw_model, asset_normalized)
+    mapping_source = "proven_server_model" if raw_model in PROVEN_SERVER_MODEL_MAP else "apk_feature_config"
     p2p_type = selected.get("type")
     online = selected.get("online") is True
     if not online or normalized != "y291ga" or p2p_type != 2:
         raise RuntimeError(
             "Phase 3D exact-target identity check failed: "
-            f"online={online}, raw_model={raw_model!r}, normalized_model={normalized!r}, p2p_type={p2p_type!r}"
+            f"online={online}, raw_model={raw_model!r}, normalized_model={normalized!r}, "
+            f"mapping_source={mapping_source!r}, p2p_type={p2p_type!r}"
         )
 
     uid = selected.get("uid")
@@ -149,6 +159,7 @@ def _fresh_exact_target(target: str, timeout: float = 10.0) -> tuple[oracle.Came
         "selected_camera": target,
         "raw_model": raw_model,
         "normalized_model": normalized,
+        "model_mapping_source": mapping_source,
         "p2p_type": p2p_type,
         "cloud_online": online,
         "DID": "AVAILABLE",
@@ -223,6 +234,7 @@ def main() -> int:
         print(f"target={material.name}")
         print(f"raw_cloud_model={material.raw_model}")
         print(f"model={material.normalized_model}")
+        print(f"model_mapping_source={preflight.get('model_mapping_source')}")
         print(f"wakeup={str(material.wakeup).lower()}")
         print("connection_flag=0x4B")
         print("secret_transport=stdin_only")
