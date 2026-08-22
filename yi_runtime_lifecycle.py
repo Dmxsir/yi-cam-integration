@@ -203,6 +203,16 @@ class _CameraRuntimeController:
         assert cfg.media_ingest_host is not None and cfg.media_ingest_port is not None
         connection: http.client.HTTPConnection | None = None
         try:
+            # go2rtc starts its MPEG-TS ProbeTimeout clock as soon as the POST
+            # handler calls mpegts.Open(r.Body). PPPP/TNP camera startup can take
+            # most or all of that five-second window, so opening the HTTP request
+            # before the first TS bytes exist can register a producer with no
+            # medias. Prebuffer one full transport chunk before opening the POST
+            # so go2rtc gets the complete probe window for actual MPEG-TS data.
+            first_chunk = stream.read(65536)
+            if not first_chunk:
+                return
+
             connection = http.client.HTTPConnection(
                 cfg.media_ingest_host,
                 cfg.media_ingest_port,
@@ -214,9 +224,13 @@ class _CameraRuntimeController:
             connection.putheader("Transfer-Encoding", "chunked")
             connection.putheader("Cache-Control", "no-store")
             connection.endheaders()
+            connection.send(f"{len(first_chunk):X}\r\n".encode("ascii"))
+            connection.send(first_chunk)
+            connection.send(b"\r\n")
             with self.lock:
                 self.publisher_connected = True
                 self.publisher_error = None
+                self.published_bytes += len(first_chunk)
                 self.updated_at = _utc_now()
 
             while not self.stop_event.is_set():
