@@ -21,6 +21,11 @@ Official references reviewed in August 2026:
 - https://developers.home-assistant.io/docs/apps/repository/
 - https://developers.home-assistant.io/docs/core/integration/config_flow/
 
+Reference implementation reviewed:
+
+- Home Assistant official Mosquitto App discovery scripts in
+  `home-assistant/addons`.
+
 ## 1. Repository layout
 
 A distributable Home Assistant App repository requires `repository.yaml` at the
@@ -117,7 +122,7 @@ YI Home must move persistent backend state to `/data`, including:
 /data/capabilities.json
 /data/runtime-state.json
 /data/logs/                 # only if persistent logs are intentionally kept
-/data/backend-api-token     # if a generated internal API credential is used
+/data/backend-api-token     # generated internal Integration/App credential
 ```
 
 Temporary probe media and transient process data should remain outside the
@@ -153,7 +158,7 @@ separate container. The service will need to bind to the App interface
 (`0.0.0.0` inside the container) while keeping the API inaccessible from the
 host unless explicitly mapped.
 
-## 6. Integration discovery
+## 6. Integration discovery and internal API authentication
 
 Home Assistant supports discovery from an App. Config flows reserve
 `async_step_hassio` specifically for a flow triggered by Supervisor App
@@ -163,20 +168,40 @@ This is the preferred direction for YI Home:
 
 ```text
 YI Home App starts
+  -> creates/loads a random backend API credential under /data
   -> publishes Supervisor discovery information
   -> Home Assistant starts/updates the YI Home config flow
+  -> Integration receives internal host/port/API credential
   -> Integration validates backend API version/health
   -> user confirms/configures account
 ```
 
-The discovery payload should contain only connection metadata required by the
-Integration. It must never contain YI camera passwords, tokens, PPPP material,
-UID/DID secrets, or other camera credentials.
+The official Mosquitto App demonstrates this pattern: it creates a random
+Home-Assistant-only password, persists it under `/data/system_user.json`, and
+publishes `host`, `port`, `username` and `password` through
+`bashio::discovery`. This gives us a supported pattern for authenticating the
+YI Home Integration to the backend without a user-managed token and without
+exposing the backend API on the host.
+
+YI Home decision:
+
+- generate a strong random backend API token on first App start;
+- persist it mode `0600` under `/data`;
+- backend listens on the internal App network;
+- publish `host`, `port`, API version and the internal API token using
+  Supervisor discovery;
+- Integration consumes the discovery in `async_step_hassio`;
+- never print the token in normal logs or diagnostics;
+- rotation/recovery behavior will be defined during 6D/6E.
+
+This internal API credential is not a YI camera/account credential. YI camera
+passwords, tokens, PPPP material, UID/DID secrets and account credentials must
+never be sent in the discovery payload.
 
 A stable Integration config-entry unique ID must be used to prevent duplicate
 setup flows.
 
-## 7. App options and credentials
+## 7. YI account credentials
 
 `options` and `schema` in `config.yaml` define Supervisor-managed App settings.
 Supervisor treats App options as potentially secret-bearing and redacts them
@@ -186,19 +211,33 @@ However, the product target remains that the user should configure the YI
 account through the Home Assistant Integration rather than manually editing App
 options.
 
-The exact secure credential handoff from Integration -> App must be finalized
-before 6D/6E are closed. Requirements:
+The secure YI credential handoff from Integration -> App must satisfy:
 
-- never place YI credentials in discovery payloads;
-- never return them through the backend API or diagnostics;
+- send credentials only over the authenticated internal backend API;
+- never place YI credentials in Supervisor discovery payloads;
+- never return them through backend read APIs or diagnostics;
 - never log them;
-- persist them only in Supervisor/Home Assistant controlled storage;
+- persist them only in Home Assistant/Supervisor-controlled storage;
+- use restrictive file permissions if the App keeps its own `/data` credential
+  record;
 - support reauthentication without reinstalling the App.
 
 Current Supervisor APIs expose a concept of `system_managed` Apps tied to a Home
 Assistant config entry, but Home Assistant Core support is still evolving in
 2026. Therefore the project must not depend on undocumented/internal management
 APIs until they are verified as supported for custom integrations.
+
+A practical v1 design is therefore:
+
+```text
+Supervisor discovery -> internal API token -> Integration
+Integration config flow -> YI account credentials
+Integration -> authenticated internal API -> App
+App -> restrictive persistent credential store under /data
+```
+
+This preserves the desired zero-terminal user experience without depending on
+unfinished system-managed App support.
 
 ## 8. Security requirements
 
@@ -262,7 +301,7 @@ Backend `/health` must distinguish:
 Capability cache and non-secret runtime preferences under `/data` should be
 included in normal App backups.
 
-Camera cloud credentials must use the chosen Supervisor/Home Assistant secure
+Camera cloud credentials must use the chosen Home Assistant/App persistent
 storage mechanism and remain restorable without appearing in diagnostics.
 
 A `cold` backup is not currently required; the engine should be designed so a
@@ -286,12 +325,13 @@ Project test sequence for Phase 6D:
 1. Build amd64 App locally.
 2. Install as Local App on HA OS.
 3. Validate /data persistence.
-4. Validate YI cloud discovery from the container.
-5. Validate native PPPP/TNP runtime in the container.
-6. Validate two simultaneous camera streams.
-7. Validate App restart and Supervisor watchdog behavior.
-8. Validate App -> Integration discovery.
-9. Validate no host privileges/config mappings are required.
+4. Validate generated internal API credential + Supervisor discovery.
+5. Validate YI cloud discovery from the container.
+6. Validate native PPPP/TNP runtime in the container.
+7. Validate two simultaneous camera streams.
+8. Validate App restart and Supervisor watchdog behavior.
+9. Validate App -> Integration async_step_hassio discovery.
+10. Validate no host privileges/config mappings are required.
 ```
 
 ## 13. Phase 6D packaging gate for this project
@@ -302,6 +342,8 @@ Phase 6D cannot be considered complete until all of the following are true:
 - explicit reproducible Docker base image;
 - full runtime packaged without development-machine paths;
 - `/data` capability/runtime persistence;
+- generated internal backend API credential persists safely under `/data`;
+- Supervisor discovery supplies the Integration with internal connection data;
 - protected mode remains enabled;
 - no host network/full access/Docker API requirements;
 - backend API reachable from Home Assistant Core through the internal network;
@@ -309,5 +351,5 @@ Phase 6D cannot be considered complete until all of the following are true:
 - RTSP publication works from the packaged container;
 - at least two cameras operate concurrently;
 - restart/self-healing works after Supervisor restarts the App;
-- secrets do not appear in App logs, discovery payloads, backend API or
-  diagnostics.
+- secrets do not appear in App logs, backend read APIs or diagnostics;
+- YI credentials never appear in Supervisor discovery payloads.
