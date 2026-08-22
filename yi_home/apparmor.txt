@@ -1,0 +1,44 @@
+#include <tunables/global>
+
+profile yi_home flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+
+  file,
+  signal (send,receive) set=(kill,term,int,hup,cont,stop),
+
+  # S6-Overlay / Bashio / standard utilities.
+  /init ix,
+  /bin/** rix,
+  /sbin/** rix,
+  /usr/bin/** rix,
+  /usr/sbin/** rix,
+  /usr/local/bin/** rix,
+  /usr/lib/bashio/** rix,
+  /usr/lib/** mr,
+  /usr/local/lib/** mr,
+  /lib/** mr,
+  /run/{,**} rwk,
+  /tmp/{,**} rwk,
+
+  # YI Home application, QEMU guest runtime and generated state.
+  /opt/yi-home/{,**} rixm,
+  /data/{,**} rwk,
+
+  # Runtime process/entropy access required by Python, FFmpeg and QEMU user mode.
+  /dev/null rw,
+  /dev/zero rw,
+  /dev/random r,
+  /dev/urandom r,
+  @{PROC}/{,**} r,
+
+  # DNS/TLS/network configuration.
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/ssl/{,**} r,
+  /etc/ca-certificates/{,**} r,
+}
