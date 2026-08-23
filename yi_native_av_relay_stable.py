@@ -47,6 +47,14 @@ EXIT_RELAY_AUDIO_FORMAT_CHANGED = 96
 EXIT_RELAY_VIDEO_UNIT_VALIDATION = 97
 EXIT_RELAY_WORKER_PIPE_SETUP = 98
 
+# The HA OS stall diagnostic proved both QEMU and FFmpeg remain alive while the
+# relay blocks writing H.264 into FFmpeg. FFmpeg's default max_interleave_delta
+# is 10 seconds, which can let a sparse/delayed audio stream hold video packets
+# long enough to backpressure the single-threaded relay. Keep live publication
+# low-latency by forcing the muxer to release interleaved packets after 500 ms.
+# The finite validation/file path is intentionally unchanged.
+LIVE_MAX_INTERLEAVE_DELTA_US = 500_000
+
 SAFE_RELAY_STAGES = {
     "native_header_read",
     "native_payload_read",
@@ -94,6 +102,20 @@ class _StagePipe:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
+
+
+def _bound_live_interleave_command(command: object) -> object:
+    """Inject one fixed live-only FFmpeg mux interleave bound."""
+    if not isinstance(command, (list, tuple)):
+        return command
+    argv = list(command)
+    if not argv or argv[-1] != "pipe:1" or "-max_interleave_delta" in argv:
+        return argv
+    argv[-1:-1] = [
+        "-max_interleave_delta",
+        str(LIVE_MAX_INTERLEAVE_DELTA_US),
+    ]
+    return argv
 
 
 def _write_safe_child_state_marker(
@@ -267,19 +289,36 @@ def main() -> int:
         audio_offset_ms: int,
     ):
         set_stage("mux_starting")
+        original_popen = relay.subprocess.Popen
+
+        def bounded_popen(command: object, *args: Any, **kwargs: Any):
+            return original_popen(
+                _bound_live_interleave_command(command),
+                *args,
+                **kwargs,
+            )
+
         try:
+            if output is None:
+                relay.subprocess.Popen = bounded_popen  # type: ignore[assignment]
             mux, video_pipe, audio_pipe = original_start_ffmpeg(
                 ffmpeg,
                 output,
                 video_offset_ms,
                 audio_offset_ms,
             )
+            if output is None:
+                original_log(
+                    "live_mux_max_interleave_delta_us="
+                    f"{LIVE_MAX_INTERLEAVE_DELTA_US}"
+                )
             return (
                 mux,
                 _StagePipe(video_pipe, "video_pipe_write", set_stage),
                 _StagePipe(audio_pipe, "audio_pipe_write", set_stage),
             )
         finally:
+            relay.subprocess.Popen = original_popen  # type: ignore[assignment]
             set_stage("native_header_read")
 
     try:
