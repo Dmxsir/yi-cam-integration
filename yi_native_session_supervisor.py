@@ -7,10 +7,11 @@ the child stops producing bytes after startup, the wrapper terminates the full
 relay process group and exits non-zero so a persistent go2rtc preload consumer
 can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
 
-For HA OS diagnosis, startup stalls use a distinct exit code, while post-start
-media-stall exits encode a best-effort, secret-safe snapshot of whether
-qemu-aarch64 and ffmpeg descendants were still alive when the watchdog fired.
-No command lines, PIDs or runtime material are surfaced.
+For HA OS diagnosis, startup stalls use a distinct exit code. Post-start media
+stalls prefer a relay-owned, secret-safe child-state marker that reports only
+whether the qemu-aarch64 worker and ffmpeg mux are alive. A /proc descendant
+snapshot remains a development fallback. No command lines, PIDs or runtime
+material are surfaced.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import selectors
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import BinaryIO
@@ -33,6 +35,7 @@ EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE = 76
 EXIT_MEDIA_STALL_QEMU_ALIVE_FFMPEG_MISSING = 77
 EXIT_MEDIA_STALL_QEMU_MISSING_FFMPEG_ALIVE = 78
 EXIT_MEDIA_STALL_QEMU_FFMPEG_MISSING = 79
+CHILD_STATE_MARKER_ENV = "YI_PHASE3_CHILD_STATE_MARKER"
 
 
 def log(message: str) -> None:
@@ -97,6 +100,50 @@ def write_all(output: BinaryIO, data: bytes) -> None:
     output.flush()
 
 
+def _create_child_state_marker() -> Path | None:
+    """Create one per-supervisor 0600 marker path, best effort."""
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="yi-child-state-",
+            dir="/tmp",
+            delete=False,
+        ) as handle:
+            path = Path(handle.name)
+        path.chmod(0o600)
+        return path
+    except OSError:
+        return None
+
+
+def _read_child_state_marker(path: Path | None) -> set[str] | None:
+    """Read only the two fixed boolean fields written by the relay."""
+    if path is None:
+        return None
+    try:
+        raw = path.read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+
+    values: dict[str, bool] = {}
+    for line in raw.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key not in {"qemu_alive", "ffmpeg_alive"}:
+            continue
+        if value not in {"0", "1"}:
+            return None
+        values[key] = value == "1"
+
+    if set(values) != {"qemu_alive", "ffmpeg_alive"}:
+        return None
+
+    comms: set[str] = set()
+    if values["qemu_alive"]:
+        comms.add("qemu-aarch64")
+    if values["ffmpeg_alive"]:
+        comms.add("ffmpeg")
+    return comms
+
+
 def _read_proc_children(pid: int) -> list[int] | None:
     try:
         raw = Path(f"/proc/{pid}/task/{pid}/children").read_text(encoding="ascii").strip()
@@ -157,8 +204,18 @@ def _classify_stall_processes(comms: set[str] | None) -> tuple[int, str]:
     return EXIT_MEDIA_STALL_QEMU_FFMPEG_MISSING, "qemu_missing_ffmpeg_missing"
 
 
-def _media_stall_diagnostic(root_pid: int) -> tuple[int, str]:
-    return _classify_stall_processes(_descendant_comms(root_pid))
+def _media_stall_diagnostic(
+    root_pid: int,
+    marker_path: Path | None,
+) -> tuple[int, str, str]:
+    marker_comms = _read_child_state_marker(marker_path)
+    if marker_comms is not None:
+        rc, state = _classify_stall_processes(marker_comms)
+        return rc, state, "relay_marker"
+
+    proc_comms = _descendant_comms(root_pid)
+    rc, state = _classify_stall_processes(proc_comms)
+    return rc, state, "proc_fallback" if proc_comms is not None else "unavailable"
 
 
 def main() -> int:
@@ -175,6 +232,12 @@ def main() -> int:
         f"START startup_timeout={args.startup_timeout:g}s; "
         f"stall_timeout={args.stall_timeout:g}s"
     )
+
+    marker_path = _create_child_state_marker()
+    child_env = os.environ.copy()
+    if marker_path is not None:
+        child_env[CHILD_STATE_MARKER_ENV] = str(marker_path)
+
     child = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -182,6 +245,7 @@ def main() -> int:
         stderr=None,
         bufsize=0,
         start_new_session=True,
+        env=child_env,
     )
     if child.stdout is None:
         raise RuntimeError("failed to capture relay stdout")
@@ -259,10 +323,14 @@ def main() -> int:
                 terminate_child(child, args.terminate_grace)
                 return EXIT_STARTUP_STALL
             if started and elapsed >= args.stall_timeout:
-                diagnostic_rc, process_state = _media_stall_diagnostic(child.pid)
+                diagnostic_rc, process_state, state_source = _media_stall_diagnostic(
+                    child.pid,
+                    marker_path,
+                )
                 log(
                     f"media_stall_detected=true; silence_seconds={elapsed:.1f}; "
                     f"forwarded_bytes={total}; stall_process_state={process_state}; "
+                    f"stall_state_source={state_source}; "
                     f"diagnostic_exit_code={diagnostic_rc}; action=terminate_and_recreate"
                 )
                 terminate_child(child, args.terminate_grace)
@@ -273,6 +341,11 @@ def main() -> int:
         selector.close()
         if child.poll() is None:
             terminate_child(child, args.terminate_grace)
+        if marker_path is not None:
+            try:
+                marker_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
