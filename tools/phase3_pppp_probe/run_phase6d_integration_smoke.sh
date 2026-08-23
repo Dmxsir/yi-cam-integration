@@ -12,7 +12,7 @@ fail() {
   exit 1
 }
 
-for file in manifest.json __init__.py api.py config_flow.py const.py strings.json translations/he.json; do
+for file in manifest.json __init__.py api.py config_flow.py const.py coordinator.py entity.py binary_sensor.py sensor.py switch.py strings.json translations/he.json; do
   [[ -f "$COMPONENT/$file" ]] || fail "missing integration artifact: $file"
 done
 printf 'integration_required_artifacts=PASS\n'
@@ -21,7 +21,12 @@ printf 'integration_required_artifacts=PASS\n'
   "$COMPONENT/__init__.py" \
   "$COMPONENT/api.py" \
   "$COMPONENT/config_flow.py" \
-  "$COMPONENT/const.py"
+  "$COMPONENT/const.py" \
+  "$COMPONENT/coordinator.py" \
+  "$COMPONENT/entity.py" \
+  "$COMPONENT/binary_sensor.py" \
+  "$COMPONENT/sensor.py" \
+  "$COMPONENT/switch.py"
 printf 'integration_python_compile=PASS\n'
 
 "$PYTHON" - "$COMPONENT/manifest.json" <<'PY'
@@ -40,6 +45,13 @@ grep -q 'async_step_hassio' "$COMPONENT/config_flow.py" || fail "async_step_hass
 grep -q 'HassioServiceInfo' "$COMPONENT/config_flow.py" || fail "HassioServiceInfo is missing"
 grep -q 'return self.async_abort(reason="app_required")' "$COMPONENT/config_flow.py" || fail "manual user flow must not bypass App discovery"
 printf 'integration_hassio_discovery_flow=PASS\n'
+
+grep -q 'Platform.BINARY_SENSOR' "$COMPONENT/__init__.py" || fail "binary_sensor platform missing"
+grep -q 'Platform.SENSOR' "$COMPONENT/__init__.py" || fail "sensor platform missing"
+grep -q 'Platform.SWITCH' "$COMPONENT/__init__.py" || fail "switch platform missing"
+grep -q 'availability_state' "$COMPONENT/binary_sensor.py" || fail "authoritative availability entity missing"
+grep -q 'persisted_desired_running' "$COMPONENT/switch.py" || fail "stream switch is not tied to persisted desired state"
+printf 'integration_camera_entities=PASS\n'
 
 if grep -RIlE 'YI_PASSWORD=|token_secret=|backend-api-token|\.env\.local' "$COMPONENT" >/dev/null; then
   fail "secret/state material leaked into integration package"
