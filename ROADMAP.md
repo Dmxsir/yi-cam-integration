@@ -4,7 +4,7 @@ The target product architecture is documented in [`docs/product-architecture.md`
 The detailed implementation sequence and exit gates are documented in [`docs/development-plan.md`](docs/development-plan.md).
 Home Assistant App packaging requirements are documented in [`docs/home-assistant-app-requirements.md`](docs/home-assistant-app-requirements.md).
 
-Latest checkpoint: [`docs/checkpoints/2026-08-23-phase6d3-haos-live-stream.md`](docs/checkpoints/2026-08-23-phase6d3-haos-live-stream.md).
+Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6e-ha-live-view.md`](docs/checkpoints/2026-08-24-phase6e-ha-live-view.md).
 
 ## Product target
 
@@ -48,7 +48,7 @@ Proven so far:
 
 - Home Assistant Core consumes Supervisor/App discovery and reaches the internal backend.
 - 7 camera Devices are registered.
-- 3 entities per camera are live: Online, Runtime status, Stream control (21 total).
+- Online, Runtime status and Stream control entities are live for each camera.
 - Stream switch controls durable App runtime intent.
 - One-camera HA OS long-run with independent live FFmpeg input writers: **PASS — 60 minutes, restart_count=0**.
 - Two-camera simultaneous HA OS smoke gate: **PASS — both runtimes remained healthy with restart_count=0 and no exit codes during the accepted test window**.
@@ -138,12 +138,19 @@ Foundation already live:
 - account form and authenticated handoff;
 - Config Entry without YI password;
 - coordinator-driven camera inventory/status;
-- 7 Devices / 21 Online, Runtime and Stream entities.
+- 7 camera Devices with Online, Runtime status and Stream control entities;
+- **Camera/live-view entities backed by the App-owned media path: PASS for tested cameras with a working upstream live source**;
+- App remains the media/runtime owner; HA Core receives no direct camera credentials.
+
+Live-view validation:
+
+- PTZ and pool render live video in Home Assistant while their runtime diagnostics remain healthy.
+- Other tested online cameras with a valid upstream live source also render through HA.
+- `צד בית` currently fails to load in both Home Assistant and the official YI application, so it is excluded from the Integration live-view gate unless the upstream source starts working and HA still fails.
 
 Next implementation target:
 
-- camera/live-view entity backed by the App-owned media path;
-- keep App as media/runtime owner and avoid direct camera credentials in HA Core;
+- availability semantics for offline/stopped/starting/no-media camera states;
 - polished translations/diagnostics and reauthentication UX;
 - dynamic camera additions where practical;
 - final secret-redaction tests.
