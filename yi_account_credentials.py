@@ -8,7 +8,6 @@ material (userid/token/token_secret) is never persisted or returned.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import tempfile
@@ -79,8 +78,16 @@ class YiAccountCredentials:
                     "invalid_request",
                     "Every YI account configuration field must be a non-empty string.",
                 )
-            if "\x00" in value:
-                raise YiAccountCredentialError("invalid_request", "YI account configuration contains an invalid character.")
+            if any(char in value for char in ("\x00", "\n", "\r")) or value != value.strip():
+                raise YiAccountCredentialError(
+                    "invalid_request",
+                    "YI account configuration contains characters that cannot be stored safely.",
+                )
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                raise YiAccountCredentialError(
+                    "invalid_request",
+                    "YI account configuration cannot be wrapped in matching quote characters.",
+                )
             limit = 4096 if key == "password" else 512
             if len(value) > limit:
                 raise YiAccountCredentialError("invalid_request", "A YI account configuration field is too long.")
@@ -204,7 +211,10 @@ class YiAccountCredentialStore:
         except OSError:
             pass
 
-        lines = [f"{key}={json.dumps(value, ensure_ascii=False)}" for key, value in credentials.env().items()]
+        # yi_tnp_oracle.load_env_file intentionally implements a very small
+        # dotenv grammar. Inputs above reject newlines, surrounding whitespace
+        # and matching wrapper quotes so raw KEY=value lines round-trip exactly.
+        lines = [f"{key}={value}" for key, value in credentials.env().items()]
         payload = "\n".join(lines) + "\n"
         fd, tmp_name = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent, text=True)
         tmp = Path(tmp_name)
