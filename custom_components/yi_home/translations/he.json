@@ -27,5 +27,22 @@
       "app_auth_failed": "Home Assistant לא הצליח להזדהות מול YI Home App.",
       "already_configured": "YI Home כבר מוגדר."
     }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": {
+        "name": "מקוון"
+      }
+    },
+    "sensor": {
+      "runtime_status": {
+        "name": "מצב מנגנון"
+      }
+    },
+    "switch": {
+      "stream": {
+        "name": "שידור"
+      }
+    }
   }
 }
