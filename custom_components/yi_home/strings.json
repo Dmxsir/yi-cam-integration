@@ -27,5 +27,22 @@
       "app_auth_failed": "Home Assistant could not authenticate to the YI Home App.",
       "already_configured": "YI Home is already configured."
     }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": {
+        "name": "Online"
+      }
+    },
+    "sensor": {
+      "runtime_status": {
+        "name": "Runtime status"
+      }
+    },
+    "switch": {
+      "stream": {
+        "name": "Stream"
+      }
+    }
   }
 }
