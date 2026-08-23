@@ -8,7 +8,8 @@
 - Home Assistant device/entity registration: **PASS** — 7 cameras, 3 entities per camera (21 entities total).
 - Phase 6D.3 short-run one-camera HA OS media: **PASS**.
 - **Phase 6D.3 long-run one-camera HA OS media: FAIL / ACTIVE INVESTIGATION.**
-- Multi-camera HA OS gate: **BLOCKED** until the long-run one-camera stall is resolved.
+- Exact pinned image 10-minute host-network long-run: **PASS**.
+- Multi-camera HA OS gate: **BLOCKED** until the HA OS-specific long-run stall is isolated.
 
 ## Architecture at this checkpoint
 
@@ -90,9 +91,9 @@ publisher_error=null
 
 This proved the FFmpeg 8 short-run regression was removed, but it was **not sufficient to close the long-run live-stream gate**.
 
-## New long-run failure evidence
+## HA OS long-run failure evidence
 
-Keeping the same PTZ stream enabled longer produced:
+Keeping the same PTZ stream enabled longer produced runtime recreations including:
 
 ```text
 desired_running=true
@@ -105,30 +106,66 @@ published_bytes=2228224
 publisher_error=null
 ```
 
-`published_bytes` is generation-local and is reset when a new runtime generation is launched, so the lower value is expected after recreation.
+Later two-camera observation also showed relay exits with `last_exit_code=1` on both PTZ and pool, while current generations could continue publishing. Therefore two distinct observed failure outcomes exist: watchdog media-stall recreation (`75`) and relay/native/mux failure (`1`).
 
-Exit code `75` is emitted by `yi_native_session_supervisor.py` only when no relay stdout bytes arrive for the configured startup/stall window. For an already-started stream this means at least 12 seconds without new MPEG-TS bytes, followed by termination/recreation of the relay process group.
+`published_bytes` is generation-local and resets when a new runtime generation is launched.
 
-`publisher_error=null` on the current generation does not indicate a go2rtc failure. The immediate fact is that the supervised relay stopped producing stdout bytes long enough to trigger the media-stall watchdog.
+Exit code `75` is emitted by `yi_native_session_supervisor.py` when no relay stdout bytes arrive for the configured startup/stall window. For an already-started stream this means at least 12 seconds without new MPEG-TS bytes, followed by termination/recreation of the relay process group.
 
-## Corrected conclusion
+The old `ValueError: read of closed file` traceback visible in App logs belongs to a previous deployment before the publisher shutdown-race fix and is not evidence for the current failure.
 
-- FFmpeg 8.0.1 definitely caused an early 20–30 second stall and must remain excluded.
-- FFmpeg 6.0.1 fixes that early regression.
-- A second, longer-duration stall still exists and is **not yet isolated**.
-- The previous 150-second validation window was too short to prove long-run stability.
-- Phase 6D.3 one-camera E2E is therefore **not complete**.
+## Exact pinned image 10-minute long-run — PASS
 
-## Next isolation gate
+The exact current `yi-home:phase6d` image was tested on the development laptop using:
 
-Before enabling a second HA camera, run the exact pinned `yi-home:phase6d` image on the development laptop for at least 10 minutes using the full persistent backend/lifecycle/shared-go2rtc path and production 12-second stall watchdog, with no RTSP consumer.
+- FFmpeg 6.0.1-static;
+- QEMU 10.1.5;
+- full persistent backend;
+- production lifecycle manager and 12-second stall watchdog;
+- shared managed go2rtc;
+- PTZ only;
+- no RTSP consumer;
+- Docker `--network host`.
+
+Result over 600 seconds:
+
+```text
+restart_count=0 for every sample
+last_exit_code=null
+generation=1
+process_alive=true
+publisher_attached=true
+publisher_error=null
+published_bytes=93192192
+producer_registered=true
+producer_media_ready=true
+publisher_ready=true
+```
+
+`published_bytes` increased monotonically from 1,572,864 at 15 seconds to 93,192,192 at 600 seconds. No runtime recreation occurred.
+
+This is strong evidence that the pinned application image, FFmpeg 6 runtime, QEMU 10.1.5, lifecycle manager, native relay and go2rtc can remain stable for at least ten minutes outside HA OS.
+
+## Current conclusion
+
+- FFmpeg 8.0.1 definitely caused the early 20–30 second stall and remains excluded.
+- FFmpeg 6.0.1 fixes that regression.
+- The exact pinned image is stable for at least 600 seconds on the development laptop with host networking.
+- HA OS still shows longer-run runtime recreation.
+- The remaining fault is therefore narrowed to an environmental difference between the successful laptop run and the HA OS App execution.
+- The most important unisolated difference is networking: the successful laptop test used Docker host networking, while the HA OS App deliberately runs with `host_network=false` behind the Home Assistant App bridge/NAT.
+- Resource scheduling/cgroup/AppArmor or HA OS-specific runtime constraints remain possible only if bridge networking is ruled out.
+
+## Next isolation gate — Docker bridge networking A/B
+
+Before changing the Home Assistant App privilege model, run the exact same pinned image on the development laptop for at least 10 minutes **without `--network host`**, using normal Docker bridge/NAT. Keep backend/go2rtc internal to the container and inspect status through `docker exec`.
 
 Interpretation:
 
-- If the pinned exact image also recreates with `exit=75`, the remaining issue is below HA/Supervisor and must be isolated inside the native relay / FFmpeg 6 / camera-session path.
-- If the pinned exact image stays `restart_count=0` for 10 minutes while HA OS recreates, focus next on HA OS container/runtime constraints, scheduling, networking or App-specific environment.
+- If the bridge-mode container recreates with `exit=75` or `exit=1`, networking/NAT becomes the leading root cause and the next proof should compare PPPP behavior with host networking versus bridge networking directly.
+- If bridge mode also remains `restart_count=0` for 10 minutes, Docker bridge/NAT is ruled out on the development host and the investigation moves to HA OS-specific App constraints (Supervisor networking implementation, resource/cgroup scheduling, AppArmor or host kernel/runtime differences).
 
-Only after one camera remains stable for a materially longer window should the multi-camera HA OS gate resume.
+Do not enable a second HA camera until the one-camera HA OS-specific difference is isolated.
 
 ## Security
 
