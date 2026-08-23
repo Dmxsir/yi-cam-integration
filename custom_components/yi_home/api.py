@@ -41,6 +41,7 @@ class YiHomeApi:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        timeout_seconds: float = 20.0,
     ) -> dict[str, Any]:
         try:
             async with self._session.request(
@@ -48,7 +49,7 @@ class YiHomeApi:
                 f"{self._base}{path}",
                 headers=self._headers,
                 json=json_body,
-                timeout=aiohttp.ClientTimeout(total=20),
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as response:
                 try:
                     payload = await response.json(content_type=None)
@@ -81,7 +82,7 @@ class YiHomeApi:
 
     async def discover(self) -> dict[str, Any]:
         """Ask the App to refresh its YI camera inventory."""
-        return await self._request("POST", "/discover")
+        return await self._request("POST", "/discover", timeout_seconds=90.0)
 
     async def cameras(self) -> dict[str, Any]:
         """Return secret-safe camera inventory."""
