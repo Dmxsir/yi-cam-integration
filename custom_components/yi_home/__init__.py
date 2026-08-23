@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import YiHomeApi, YiHomeApiError
 from .const import CONF_API_TOKEN
+from .coordinator import YiHomeCoordinator
+
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.SWITCH]
 
 
-type YiHomeConfigEntry = ConfigEntry[YiHomeApi]
+@dataclass
+class YiHomeRuntimeData:
+    """Runtime-only state for one YI Home config entry."""
+
+    api: YiHomeApi
+    coordinator: YiHomeCoordinator
+
+
+type YiHomeConfigEntry = ConfigEntry[YiHomeRuntimeData]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: YiHomeConfigEntry) -> bool:
@@ -24,12 +38,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: YiHomeConfigEntry) -> bo
     )
     try:
         await api.health()
-    except YiHomeApiError:
-        return False
-    entry.runtime_data = api
+    except YiHomeApiError as exc:
+        raise ConfigEntryNotReady("YI Home App is not ready") from exc
+
+    coordinator = YiHomeCoordinator(hass, api)
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = YiHomeRuntimeData(api=api, coordinator=coordinator)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: YiHomeConfigEntry) -> bool:
     """Unload YI Home."""
-    return True
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
