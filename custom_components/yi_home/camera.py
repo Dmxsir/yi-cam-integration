@@ -51,7 +51,12 @@ class YiHomeLiveCamera(YiHomeCameraEntity, Camera):
         host: str,
         rtsp_port: int,
     ) -> None:
-        super().__init__(coordinator, stable_id)
+        # CoordinatorEntity and Camera both derive from Entity but Camera has
+        # its own mandatory runtime initialization (stream state, tokens,
+        # locks). YiHomeCameraEntity initializes only the coordinator side, so
+        # call both bases explicitly instead of relying on cooperative super().
+        YiHomeCameraEntity.__init__(self, coordinator, stable_id)
+        Camera.__init__(self)
         self._attr_unique_id = f"{stable_id}_camera"
         self._rtsp_host = host
         self._rtsp_port = rtsp_port
