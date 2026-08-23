@@ -29,7 +29,7 @@ async def async_setup_entry(
 class YiHomeOnlineBinarySensor(YiHomeCameraEntity, BinarySensorEntity):
     """Authoritative PPPP_CheckDevOnline state for a YI camera."""
 
-    _attr_name = "Online"
+    _attr_translation_key = "online"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(self, coordinator: YiHomeCoordinator, stable_id: str) -> None:
