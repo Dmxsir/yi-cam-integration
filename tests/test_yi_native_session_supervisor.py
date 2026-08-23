@@ -6,6 +6,10 @@ import yi_native_session_supervisor as supervisor
 
 
 class YiNativeSessionSupervisorDiagnosticsTests(unittest.TestCase):
+    def test_startup_stall_has_distinct_code(self) -> None:
+        self.assertEqual(supervisor.EXIT_STARTUP_STALL, 74)
+        self.assertNotEqual(supervisor.EXIT_STARTUP_STALL, supervisor.EXIT_MEDIA_STALL)
+
     def test_process_state_unavailable_preserves_generic_media_stall_code(self) -> None:
         self.assertEqual(
             supervisor._classify_stall_processes(None),
