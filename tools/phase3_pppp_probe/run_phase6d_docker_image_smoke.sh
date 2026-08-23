@@ -13,6 +13,7 @@ fail() {
 
 command -v docker >/dev/null 2>&1 || fail "docker is not installed"
 docker info >/dev/null 2>&1 || fail "docker daemon is not available to the current user"
+command -v readelf >/dev/null 2>&1 || fail "readelf is required on the host"
 [[ -x "$PYTHON" ]] || command -v "$PYTHON" >/dev/null 2>&1 || fail "python is unavailable: $PYTHON"
 
 echo "production_modified=false"
@@ -47,6 +48,7 @@ docker run --rm --entrypoint /bin/sh "$IMAGE" -ec '
   test -x /opt/yi-home/runtime/bionic-root/system/bin/linker64
   test -x /opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/android_pppp_online_probe
   test -f /opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/libPPPP_API.so
+  cd /opt/yi-home/app
   python3 - <<"PY"
 import cryptography
 import yi_addon_service
@@ -80,10 +82,11 @@ echo "image_secret_state_scan=PASS"
 # symbol used for authoritative TNP availability. The host readelf operates on
 # a temporary copy extracted from the image, never on production runtime files.
 CHECK_CONTAINER="$(docker create "$IMAGE")"
-TMP_LIB="$(mktemp)"
+TMP_DIR="$(mktemp -d)"
+TMP_LIB="$TMP_DIR/libPPPP_API.so"
 cleanup() {
   docker rm -f "$CHECK_CONTAINER" >/dev/null 2>&1 || true
-  rm -f "$TMP_LIB"
+  rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
 
