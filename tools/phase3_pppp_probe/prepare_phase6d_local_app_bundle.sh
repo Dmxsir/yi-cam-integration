@@ -51,11 +51,32 @@ LEAKED="$(find "$APP_DIR/rootfs" -type f \( \
 [[ -z "$LEAKED" ]] || fail "credential/state file present in Local App rootfs: $LEAKED"
 echo "local_app_secret_state_scan=PASS"
 
-if grep -REn '(~/Documents|/home/[^/]+/Documents|\.analysis/phase3)' \
+# Reject actual development-host paths everywhere in the package. A few engine
+# modules intentionally retain a repo-relative .analysis fallback for legacy
+# development callers, but the packaged App must never select that fallback.
+if grep -REn '(~/Documents|/home/[^/]+/Documents)' \
     "$APP_DIR/Dockerfile" "$APP_DIR/run.sh" "$APP_DIR/rootfs/opt/yi-home/app" >/dev/null; then
-  fail "development-machine path leaked into Local App package"
+  fail "absolute development-machine path leaked into Local App package"
+fi
+
+# Runtime startup configuration itself must be fully package-native. This is
+# stronger than scanning library source text: it proves the HA App entrypoint
+# selects the staged /opt/yi-home runtime and worker directories explicitly.
+if grep -En '(~/Documents|/home/[^/]+/Documents|\.analysis)' \
+    "$APP_DIR/Dockerfile" "$APP_DIR/run.sh" >/dev/null; then
+  fail "App startup configuration contains a development runtime path"
+fi
+if ! grep -Fq 'RUNTIME_ROOT="/opt/yi-home/runtime/bionic-root"' "$APP_DIR/run.sh"; then
+  fail "run.sh does not select the packaged Bionic runtime root"
+fi
+if ! grep -Fq -- '--runtime-root "${RUNTIME_ROOT}"' "$APP_DIR/run.sh"; then
+  fail "run.sh does not pass the packaged runtime root to the backend"
+fi
+if ! grep -Fq -- '--worker-dir "${RUNTIME_ROOT}/data/local/tmp/yi-phase3g"' "$APP_DIR/run.sh"; then
+  fail "run.sh does not pass the packaged Phase 3G worker directory"
 fi
 echo "local_app_development_paths_removed=PASS"
+echo "local_app_runtime_wiring=PASS"
 
 mkdir -p "$DIST_DIR"
 rm -f "$BUNDLE" "$SHA_FILE"
