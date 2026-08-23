@@ -66,6 +66,20 @@ class YiHomeLiveCamera(YiHomeCameraEntity, Camera):
         """Generate still images from the same App-owned stream."""
         return True
 
+    @property
+    def available(self) -> bool:
+        """Keep online/stopped cameras present while marking true offline cameras unavailable."""
+        if not super().available:
+            return False
+        camera = self.camera_data
+        if not isinstance(camera, dict):
+            return False
+
+        # PPPP_CheckDevOnline is the authoritative reachability signal. Unknown
+        # is intentionally treated as available so a transient probe failure
+        # does not make a healthy/stopped camera flap to unavailable.
+        return camera.get("availability_state") != "offline"
+
     @staticmethod
     def _stream_ready(runtime: Any, publication: Any) -> bool:
         return bool(
@@ -85,9 +99,30 @@ class YiHomeLiveCamera(YiHomeCameraEntity, Camera):
             return False
         return self._stream_ready(camera.get("runtime"), camera.get("publication"))
 
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Expose a compact secret-safe live-view status for diagnostics."""
+        camera = self.camera_data or {}
+        runtime = camera.get("runtime")
+        publication = camera.get("publication")
+        runtime = runtime if isinstance(runtime, dict) else {}
+        publication = publication if isinstance(publication, dict) else {}
+        return {
+            "availability_state": camera.get("availability_state"),
+            "runtime_state": camera.get("runtime_state"),
+            "desired_running": camera.get("persisted_desired_running"),
+            "process_alive": runtime.get("process_alive"),
+            "stream_ready": self._stream_ready(runtime, publication),
+            "publisher_ready": publication.get("publisher_ready"),
+            "producer_media_ready": publication.get("producer_media_ready"),
+        }
+
     def _source_from_status(self, status: dict[str, Any]) -> str | None:
         if status.get("secrets_exposed") is not False:
             return None
+        if status.get("availability_state") == "offline":
+            return None
+
         runtime = status.get("runtime")
         publication = status.get("publication")
         if not self._stream_ready(runtime, publication):
