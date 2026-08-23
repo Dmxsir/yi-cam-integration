@@ -1,0 +1,31 @@
+{
+  "title": "YI Home",
+  "config": {
+    "step": {
+      "hassio_account": {
+        "title": "Connect your YI Home account",
+        "description": "Enter your YI Home account. The password is sent directly to the YI Home App and is not stored in the Home Assistant config entry.",
+        "data": {
+          "account": "Account",
+          "password": "Password",
+          "country": "Country code",
+          "region": "Region"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the YI Home App.",
+      "invalid_auth": "YI rejected the account credentials.",
+      "rate_limited": "YI temporarily rate-limited login attempts. Try again later.",
+      "account_setup_failed": "The YI account could not be configured."
+    },
+    "abort": {
+      "app_required": "Install and start the YI Home App first.",
+      "invalid_discovery": "The YI Home App published invalid discovery information.",
+      "cannot_connect": "Cannot connect to the discovered YI Home App.",
+      "unsafe_backend": "The YI Home App returned an unsafe backend state.",
+      "app_auth_failed": "Home Assistant could not authenticate to the YI Home App.",
+      "already_configured": "YI Home is already configured."
+    }
+  }
+}
