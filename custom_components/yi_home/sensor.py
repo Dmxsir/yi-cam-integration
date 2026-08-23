@@ -11,6 +11,24 @@ from .coordinator import YiHomeCoordinator
 from .entity import YiHomeCameraEntity
 
 
+_FAILURE_STAGE_BY_EXIT_CODE = {
+    1: "relay_failure_legacy",
+    75: "media_stall",
+    81: "native_worker_exit",
+    82: "mpegts_mux_exit",
+    83: "no_video_frames",
+    84: "no_audio_frames",
+    85: "relay_exception",
+    86: "relay_failure_unclassified",
+}
+
+
+def _failure_stage(exit_code: object) -> str | None:
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None
+    return _FAILURE_STAGE_BY_EXIT_CODE.get(exit_code)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -48,12 +66,14 @@ class YiHomeRuntimeSensor(YiHomeCameraEntity, SensorEntity):
         camera = self.camera_data or {}
         runtime = camera.get("runtime")
         runtime = runtime if isinstance(runtime, dict) else {}
+        last_exit_code = runtime.get("last_exit_code")
         return {
             "desired_running": camera.get("persisted_desired_running"),
             "process_alive": runtime.get("process_alive"),
             "restart_count": runtime.get("restart_count"),
             "last_reason": runtime.get("last_reason"),
-            "last_exit_code": runtime.get("last_exit_code"),
+            "last_exit_code": last_exit_code,
+            "last_failure_stage": _failure_stage(last_exit_code),
             "publisher_attached": runtime.get("media_publisher_attached"),
             "published_bytes": runtime.get("published_bytes"),
             "publisher_error": runtime.get("publisher_error"),
