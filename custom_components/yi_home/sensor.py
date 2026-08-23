@@ -53,5 +53,8 @@ class YiHomeRuntimeSensor(YiHomeCameraEntity, SensorEntity):
             "process_alive": runtime.get("process_alive"),
             "restart_count": runtime.get("restart_count"),
             "last_reason": runtime.get("last_reason"),
+            "last_exit_code": runtime.get("last_exit_code"),
             "publisher_attached": runtime.get("media_publisher_attached"),
+            "published_bytes": runtime.get("published_bytes"),
+            "publisher_error": runtime.get("publisher_error"),
         }

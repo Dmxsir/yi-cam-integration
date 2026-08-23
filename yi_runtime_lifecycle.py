@@ -209,7 +209,14 @@ class _CameraRuntimeController:
             # before the first TS bytes exist can register a producer with no
             # medias. Prebuffer one full transport chunk before opening the POST
             # so go2rtc gets the complete probe window for actual MPEG-TS data.
-            first_chunk = stream.read(65536)
+            try:
+                first_chunk = stream.read(65536)
+            except ValueError:
+                # The lifecycle thread may close stdout after the supervised
+                # runtime exits. Treat that as EOF, not a publisher failure.
+                if self.stop_event.is_set() or process.poll() is not None:
+                    return
+                raise
             if not first_chunk:
                 return
 
@@ -234,7 +241,13 @@ class _CameraRuntimeController:
                 self.updated_at = _utc_now()
 
             while not self.stop_event.is_set():
-                chunk = stream.read(65536)
+                try:
+                    chunk = stream.read(65536)
+                except ValueError:
+                    # A closed pipe after process exit is a normal EOF race.
+                    if self.stop_event.is_set() or process.poll() is not None:
+                        break
+                    raise
                 if not chunk:
                     break
                 connection.send(f"{len(chunk):X}\r\n".encode("ascii"))
@@ -253,7 +266,7 @@ class _CameraRuntimeController:
             except (OSError, http.client.HTTPException):
                 if not self.stop_event.is_set():
                     raise
-        except (OSError, http.client.HTTPException):
+        except (OSError, ValueError, http.client.HTTPException):
             with self.lock:
                 self.publisher_error = "media_publish_failed"
                 self.publisher_connected = False
@@ -340,13 +353,28 @@ class _CameraRuntimeController:
                 first_launch = False
 
                 rc = process.wait()
+
+                # Let the publisher consume the pipe EOF before closing stdout.
+                # Closing stdout first races with stream.read() in the publisher
+                # thread and previously produced "ValueError: read of closed file".
+                if pump_thread is not None and pump_thread is not threading.current_thread():
+                    pump_thread.join(timeout=self.config.media_ingest_timeout + 2.0)
+
                 if process.stdout is not None:
                     try:
                         process.stdout.close()
                     except OSError:
                         pass
-                if pump_thread is not None and pump_thread is not threading.current_thread():
-                    pump_thread.join(timeout=self.config.media_ingest_timeout + 2.0)
+
+                # If a reader was still blocked, closing the pipe above wakes it;
+                # give it a final bounded chance to terminate cleanly.
+                if (
+                    pump_thread is not None
+                    and pump_thread is not threading.current_thread()
+                    and pump_thread.is_alive()
+                ):
+                    pump_thread.join(timeout=1.0)
+
                 log_stream.close()
                 runtime_seconds = time.monotonic() - launched_mono
                 with self.lock:
