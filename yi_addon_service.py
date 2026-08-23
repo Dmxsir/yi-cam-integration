@@ -23,6 +23,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import yi_tnp_oracle as oracle
+from yi_account_credentials import YiAccountCredentialError, YiAccountCredentialStore
 from yi_addon_backend import YiAddonBackend
 from yi_capability_cache import YiCapabilityCache
 from yi_capability_probe_runtime import YiCapabilityProbe
@@ -41,20 +42,46 @@ START_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/start$")
 STOP_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/stop$")
 RESTART_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/restart$")
 REPROBE_RE = re.compile(r"^/api/v1/cameras/([0-9a-f]{20})/reprobe$")
+ACCOUNT_PATH = "/api/v1/account"
+MAX_JSON_BODY = 16 * 1024
 
 
 def _is_loopback(bind: str) -> bool:
     return bind in {"127.0.0.1", "::1", "localhost"}
 
 
+def _credential_http_status(code: str) -> int:
+    return {
+        "invalid_request": HTTPStatus.BAD_REQUEST,
+        "invalid_credentials": HTTPStatus.UNAUTHORIZED,
+        "mfa_or_challenge": HTTPStatus.CONFLICT,
+        "rate_limit": HTTPStatus.TOO_MANY_REQUESTS,
+        "configuration_error": HTTPStatus.BAD_REQUEST,
+        "transport_error": HTTPStatus.BAD_GATEWAY,
+        "unsupported_api": HTTPStatus.BAD_GATEWAY,
+        "server_rejection": HTTPStatus.BAD_GATEWAY,
+        "unexpected_response_schema": HTTPStatus.BAD_GATEWAY,
+    }.get(code, HTTPStatus.BAD_GATEWAY)
+
+
 class YiAddonHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], backend: YiAddonBackend, api_token: str | None) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        backend: YiAddonBackend,
+        api_token: str | None,
+        credential_store: YiAccountCredentialStore | None,
+        account_timeout: float,
+    ) -> None:
         super().__init__(address, YiAddonRequestHandler)
         self.backend = backend
         self.api_token = api_token
+        self.credential_store = credential_store
+        self.account_timeout = account_timeout
+        self.account_lock = threading.RLock()
 
 
 class YiAddonRequestHandler(BaseHTTPRequestHandler):
@@ -104,12 +131,43 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
             return None
         return parsed.path
 
+    def _read_json_body(self) -> dict[str, Any] | None:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().casefold()
+        if content_type != "application/json":
+            self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "json_required", "This endpoint requires application/json.")
+            return None
+        raw_length = self.headers.get("Content-Length")
+        try:
+            length = int(raw_length) if raw_length is not None else -1
+        except ValueError:
+            length = -1
+        if length <= 0 or length > MAX_JSON_BODY:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_body_length", "The JSON request body length is invalid.")
+            return None
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_json", "The request body is not valid UTF-8 JSON.")
+            return None
+        if not isinstance(payload, dict):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_json", "The request body must be a JSON object.")
+            return None
+        return payload
+
     def do_GET(self) -> None:  # noqa: N802
         path = self._preflight()
         if path is None:
             return
         if path == "/api/v1/health":
             self._json(HTTPStatus.OK, self.server.backend.health())
+            return
+        if path == ACCOUNT_PATH:
+            store = self.server.credential_store
+            if store is None:
+                self._error(HTTPStatus.CONFLICT, "account_store_unavailable", "Persistent YI account storage is not enabled.")
+            else:
+                self._json(HTTPStatus.OK, store.status())
             return
         if path == "/api/v1/cameras":
             self._json(HTTPStatus.OK, self.server.backend.cameras())
@@ -139,6 +197,50 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
         path = self._preflight()
         if path is None:
             return
+
+        if path == ACCOUNT_PATH:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            store = self.server.credential_store
+            if store is None:
+                self._error(HTTPStatus.CONFLICT, "account_store_unavailable", "Persistent YI account storage is not enabled.")
+                return
+            with self.server.account_lock:
+                try:
+                    account_result = store.configure(payload, timeout=self.server.account_timeout)
+                except YiAccountCredentialError as exc:
+                    self._error(_credential_http_status(exc.code), exc.code, exc.safe_message)
+                    return
+                try:
+                    discovery = self.server.backend.discover(fetch_tnp=True)
+                except Exception:
+                    self._json(
+                        HTTPStatus.BAD_GATEWAY,
+                        {
+                            "ok": False,
+                            "configured": True,
+                            "credentials_persisted": True,
+                            "error": {
+                                "code": "discovery_failed",
+                                "message": "The YI account was validated and stored, but camera discovery failed.",
+                            },
+                            "secrets_exposed": False,
+                        },
+                    )
+                    return
+            self._json(
+                HTTPStatus.OK,
+                {
+                    **account_result,
+                    "discovery_ok": True,
+                    "camera_count": discovery.get("camera_count", account_result.get("camera_count", 0)),
+                    "discovery_generation": discovery.get("generation"),
+                    "secrets_exposed": False,
+                },
+            )
+            return
+
         length = self.headers.get("Content-Length")
         if length not in {None, "", "0"}:
             self._error(HTTPStatus.BAD_REQUEST, "body_not_supported", "This endpoint does not accept a request body.")
@@ -162,18 +264,18 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
             if match:
                 stable_id = match.group(1)
                 if operation == "start":
-                    status, payload = self.server.backend.start_camera(stable_id)
+                    status, response = self.server.backend.start_camera(stable_id)
                 elif operation == "stop":
-                    status, payload = self.server.backend.stop_camera(stable_id)
+                    status, response = self.server.backend.stop_camera(stable_id)
                 else:
-                    status, payload = self.server.backend.restart_camera(stable_id)
-                self._json(status, payload)
+                    status, response = self.server.backend.restart_camera(stable_id)
+                self._json(status, response)
                 return
 
         match = REPROBE_RE.fullmatch(path)
         if match:
-            status, payload = self.server.backend.reprobe_camera(match.group(1))
-            self._json(status, payload)
+            status, response = self.server.backend.reprobe_camera(match.group(1))
+            self._json(status, response)
             return
 
         self._error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API endpoint.")
@@ -233,6 +335,8 @@ def main() -> int:
             os.chmod(data_dir, 0o700)
         except OSError:
             pass
+
+    credential_store = YiAccountCredentialStore(args.env_file) if args.env_file is not None else None
 
     selected_runtime_state = args.runtime_state_dir
     if selected_runtime_state is None and data_dir is not None:
@@ -310,7 +414,13 @@ def main() -> int:
         else:
             initial_discovery_ok = True
 
-    server = YiAddonHTTPServer((args.bind, args.port), backend, token)
+    server = YiAddonHTTPServer(
+        (args.bind, args.port),
+        backend,
+        token,
+        credential_store,
+        args.timeout,
+    )
     stopping = threading.Event()
 
     def request_stop(_signum: int, _frame: object) -> None:
@@ -341,6 +451,7 @@ def main() -> int:
             daemon=True,
         ).start()
 
+    account_configured = credential_store.status().get("configured", False) if credential_store is not None else False
     print(
         json.dumps(
             {
@@ -354,6 +465,7 @@ def main() -> int:
                 "media_publisher_enabled": media_publisher is not None,
                 "persistence_enabled": data_dir is not None,
                 "managed_runtime_count": lifecycle.managed_count() if lifecycle is not None else 0,
+                "account_configured": bool(account_configured),
                 "initial_discovery_ok": initial_discovery_ok,
                 "discovery_retry_enabled": bool(
                     not args.no_initial_discovery and args.discovery_retry_interval > 0
