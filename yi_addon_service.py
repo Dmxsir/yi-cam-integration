@@ -353,6 +353,7 @@ def main() -> int:
                 "reprobe_ready": capability_probe is not None,
                 "media_publisher_enabled": media_publisher is not None,
                 "persistence_enabled": data_dir is not None,
+                "managed_runtime_count": lifecycle.managed_count() if lifecycle is not None else 0,
                 "initial_discovery_ok": initial_discovery_ok,
                 "discovery_retry_enabled": bool(
                     not args.no_initial_discovery and args.discovery_retry_interval > 0
