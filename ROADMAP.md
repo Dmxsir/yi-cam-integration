@@ -50,6 +50,8 @@ Proven so far:
 - 7 camera Devices are registered.
 - 3 entities per camera are live: Online, Runtime status, Stream control (21 total).
 - Stream switch controls durable App runtime intent.
+- One-camera HA OS long-run with independent live FFmpeg input writers: **PASS — 60 minutes, restart_count=0**.
+- Two-camera simultaneous HA OS smoke gate: **PASS — both runtimes remained healthy with restart_count=0 and no exit codes during the accepted test window**.
 
 #### FFmpeg 8 early-stall regression — RESOLVED
 
@@ -64,67 +66,54 @@ Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 
 The App now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256. The normal App QEMU 10.1.5 remains in use.
 
-#### One-camera HA OS long-run gate — ACTIVE / TWO LOWER-LEVEL FAILURE PATHS IDENTIFIED
+#### One-camera HA OS long-run gate — PASS
 
-HA OS continues to show runtime recreation after apparently healthy publication. The same exact pinned image passed two independent 10-minute development-host tests:
+Earlier HA OS runs recreated after apparently healthy publication while the same exact pinned image passed independent 10-minute host-network and bridge/NAT tests. AppArmor, ordinary Docker NAT and the original FFmpeg 8 regression were ruled out.
 
-```text
-Docker host networking:   generation=1, restart_count=0, 93,192,192 bytes
-Docker bridge/NAT:        generation=1, restart_count=0, 81,264,640 bytes
-```
-
-Ordinary Docker bridge/NAT is therefore ruled out.
-
-A first HA OS test with AppArmor disabled happened to pass for roughly ten minutes, but repeat testing with `apparmor: false` failed within a few minutes with `restart_count=2` and `exit=1`. Broad AppArmor A/Bs for `network,`, `signal,`, and combined `unix, + capability, + ptrace,` also failed. AppArmor is therefore **ruled out as the primary cause**; the earlier successful disabled-profile run was intermittent rather than causal.
-
-Structured diagnostics then separated two real HA OS failure paths:
+Structured diagnostics isolated two lower-level paths:
 
 ```text
-95 = audio/AAC unit validation failure
-75 = post-start MPEG-TS stall with process state unavailable
+95 = malformed/corrupt AAC unit validation
+103 = qemu + ffmpeg alive; relay blocked writing H.264 into FFmpeg
 ```
 
-The `95` path has a targeted recovery fix: isolated malformed/corrupt channel-1 audio records are now dropped without tearing down the H.264/PPPP session. Session/config invariants remain fatal. After that fix was deployed, the next observed restart was `75`, not `95`.
+The `95` path was made recoverable by dropping only isolated malformed AAC units. The remaining repeated `103` path was traced to the single-thread relay feeding both FFmpeg inputs. A blocked H.264 pipe could stop the same thread from feeding AAC and consuming native media.
 
-Startup stalls now have a distinct code:
+The live adapter now decouples FFmpeg inputs:
 
 ```text
-74 = no first MPEG-TS bytes before startup timeout
+native relay main loop
+  -> video queue -> dedicated H.264 writer -> FFmpeg video pipe
+  -> audio queue -> dedicated AAC writer  -> FFmpeg audio pipe
 ```
 
-Therefore the latest `75` is proven to be a **post-start** stall, not a startup/session-establishment timeout.
-
-The first stall classifier relied on `/proc/<pid>/task/<pid>/children`; HA OS returned that process snapshot as unavailable. The latest diagnostic removes this dependency as the primary source: the relay now reports only two `0600` booleans from the direct QEMU and FFmpeg `Popen` handles, and the supervisor consumes that marker when the 12-second stall watchdog fires.
-
-Current stall codes:
+Result on HA OS under the normal restrictive AppArmor profile:
 
 ```text
-74 = startup stall
-75 = post-start media stall; child state unavailable
-76 = post-start stall; qemu-aarch64 alive + ffmpeg alive
-77 = post-start stall; qemu-aarch64 alive + ffmpeg missing
-78 = post-start stall; qemu-aarch64 missing + ffmpeg alive
-79 = post-start stall; qemu-aarch64 missing + ffmpeg missing
+PTZ-only long-run: 60 minutes
+restart_count=0
+last_reason=started
+no last exit code
+publisher remained attached
+published bytes continued increasing
 ```
 
-Other structured relay codes remain available for native-worker, mux, parser, pipe, timeout, and media-validation failures (`81–98`).
+This is a strong A/B against the previous run that accumulated 48 `103` restarts in roughly one hour.
 
-Current conclusion:
+Relevant commits:
 
-- FFmpeg 6.0.1 fixes the original FFmpeg 8 regression.
-- The pinned image/runtime stack is stable for at least ten minutes under both host networking and ordinary Docker bridge/NAT outside HA OS.
-- AppArmor is not the primary cause.
-- One crash family was isolated to malformed AAC units and now has a packet-drop recovery path.
-- A separate post-start stall remains and is the active blocker.
-- The next gate is to obtain `76/77/78/79` from the relay-owned child-state marker and follow that exact component state instead of broad environment A/B testing.
+```text
+58cdef37  Tolerate isolated malformed AAC units in live relay
+dee48d80  Decouple live FFmpeg video and audio pipe writers
+e7e3e2af  Test independent live FFmpeg input writers
+7cd583fb  Record persistent video pipe stalls and async writer fix
+```
 
-Next gate:
+#### Multi-camera HA OS gate — IN PROGRESS / SMOKE PASS
 
-1. Keep the normal restrictive AppArmor profile and PTZ-only scope.
-2. Deploy the latest relay + supervisor child-state marker diagnostics together.
-3. Run until the first recreation; no long-duration wait is required.
-4. Follow `76/77/78/79` (or any other structured code) directly.
-5. Only after one-camera long-run stability is proven should two-camera HA OS testing resume.
+After the one-camera long-run PASS, two cameras were enabled concurrently. During the accepted smoke window both reported healthy runtime state, `restart_count=0`, and no exit code. The user explicitly accepted moving forward without another one-hour hold.
+
+This removes the previous hard blocker on continuing Phase 6E work, while longer multi-camera soak testing can still be repeated later as a regression gate before release.
 
 ### Phase 6D.4 — Architecture support — PLANNED
 
@@ -136,7 +125,7 @@ Phase 6D exit gate remains:
 - fresh HA OS App install/start;
 - Integration-driven account setup;
 - automatic camera/device/entity discovery;
-- long-running stable App-owned media under the final restrictive security profile;
+- stable App-owned media under the final restrictive security profile;
 - at least two simultaneous independent streams;
 - persisted desired-running behavior survives App restart;
 - no terminal/manual UID/DID/model/RTSP/YAML/Android dependency in normal use.
@@ -151,9 +140,10 @@ Foundation already live:
 - coordinator-driven camera inventory/status;
 - 7 Devices / 21 Online, Runtime and Stream entities.
 
-Remaining:
+Next implementation target:
 
 - camera/live-view entity backed by the App-owned media path;
+- keep App as media/runtime owner and avoid direct camera credentials in HA Core;
 - polished translations/diagnostics and reauthentication UX;
 - dynamic camera additions where practical;
 - final secret-redaction tests.
@@ -174,7 +164,7 @@ No UID/DID/model/TNP/RTSP/YAML required from the user.
 
 - Stable App-owned RTSP endpoints.
 - Frigate remains optional and separate from the core App/Integration lifecycle.
-- Validate Frigate only after the App-native long-run and multi-camera gates pass.
+- Validate Frigate again as a final regression after the HA camera/live-view entity is in place.
 
 ## Later work
 
