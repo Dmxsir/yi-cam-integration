@@ -47,6 +47,10 @@ _STDOUT_CONSUMER_CLOSED = threading.Event()
 _PUMPS: list[threading.Thread] = []
 
 
+class AudioUnitValidationError(RuntimeError):
+    """One malformed/corrupt audio record that may be dropped in a live stream."""
+
+
 def log(message: str) -> None:
     try:
         print(f"[phase3g-relay] {message}", file=sys.stderr, flush=True)
@@ -89,16 +93,17 @@ def signed_delta32(current: int, base: int) -> int:
 
 def decrypt_audio_unit(raw: bytes, password: str) -> tuple[int, bytes, dict[str, int]]:
     if len(raw) < 39 or raw[0] < 2 or raw[1] != 2:
-        raise RuntimeError("malformed TNP v2 audio unit")
+        raise AudioUnitValidationError("malformed TNP v2 audio unit")
     if int.from_bytes(raw[4:8], "big") != len(raw) - 8:
-        raise RuntimeError("TNP audio size mismatch")
+        raise AudioUnitValidationError("TNP audio size mismatch")
     media = raw[8:32]
     if int.from_bytes(media[0:2], "big") != 138:
-        raise RuntimeError("native relay expected AAC codec id 138")
+        raise AudioUnitValidationError("native relay expected AAC codec id 138")
 
     access_unit = raw[32:]
     key = (password + "0").encode("ascii")
     if len(key) != 16:
+        # This is a session/config invariant, not a packet-level corruption.
         raise RuntimeError("TNP audio AES key is not 16 bytes")
     aligned = (len(access_unit) // 16) * 16
     if aligned:
@@ -106,11 +111,11 @@ def decrypt_audio_unit(raw: bytes, password: str) -> tuple[int, bytes, dict[str,
         access_unit = decryptor.update(access_unit[:aligned]) + decryptor.finalize() + access_unit[aligned:]
 
     if len(access_unit) < 7 or access_unit[0] != 0xFF or (access_unit[1] & 0xF0) != 0xF0:
-        raise RuntimeError("decrypted AAC payload has no native ADTS header")
+        raise AudioUnitValidationError("decrypted AAC payload has no native ADTS header")
     rates = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
     freq_index = (access_unit[2] >> 2) & 0x0F
     if freq_index >= len(rates):
-        raise RuntimeError("invalid native ADTS sample-rate index")
+        raise AudioUnitValidationError("invalid native ADTS sample-rate index")
     channels = ((access_unit[2] & 0x01) << 2) | ((access_unit[3] >> 6) & 0x03)
     object_type = ((access_unit[2] >> 6) & 0x03) + 1
     timestamp_ms = int.from_bytes(media[20:24], "big")
@@ -432,6 +437,7 @@ def main() -> int:
         audio_format: dict[str, int] | None = None
         video_frames = 0
         audio_frames = 0
+        audio_validation_drops = 0
 
         def start_mux_if_ready() -> None:
             nonlocal mux, video_pipe, audio_pipe, output_file
@@ -475,7 +481,24 @@ def main() -> int:
                 raw = read_exact(child.stdout, length)
 
                 if channel == 1:
-                    timestamp_ms, aac, fmt = decrypt_audio_unit(raw, material.password)
+                    try:
+                        timestamp_ms, aac, fmt = decrypt_audio_unit(raw, material.password)
+                    except AudioUnitValidationError:
+                        # A long-running live PPPP session may occasionally yield
+                        # one malformed/corrupt channel-1 record. The native
+                        # worker has already framed the record atomically, so one
+                        # bad audio unit must not tear down otherwise healthy
+                        # H.264 publication. Drop only the isolated audio record;
+                        # session/config invariants still raise normal errors.
+                        audio_validation_drops += 1
+                        if audio_validation_drops <= 3 or (
+                            audio_validation_drops & (audio_validation_drops - 1)
+                        ) == 0:
+                            log(
+                                f"audio_validation_drop_count={audio_validation_drops}; "
+                                "action=drop_and_continue"
+                            )
+                        continue
                     if audio_format is None:
                         audio_format = fmt
                     elif fmt != audio_format:
@@ -530,6 +553,8 @@ def main() -> int:
             _close_pipe(output_file)
             output_file = None
 
+        if audio_validation_drops:
+            log(f"audio_validation_drop_total={audio_validation_drops}")
         log(f"native_worker_exit={child_rc}; mpegts_mux_exit={mux_rc}; video_frames={video_frames}; audio_frames={audio_frames}")
         if child_rc != 0 or mux_rc != 0 or video_frames == 0 or audio_frames == 0:
             log("PHASE3G_NATIVE_AV=FAIL")
