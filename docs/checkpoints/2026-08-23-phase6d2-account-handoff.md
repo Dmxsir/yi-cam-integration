@@ -6,7 +6,8 @@
 - HA OS bootstrap: COMPLETE.
 - **Phase 6D.2: ACTIVE.**
 - Phase 6D.2 development/unit/API packaging gate: **PASS**.
-- Next live gate: rebuild the HA OS Local App, then perform authenticated account handoff against the real YI account.
+- HA OS updated App startup/account-security gate: **PASS**.
+- Next live gate: authenticated real-account handoff, discovery, then restart persistence.
 
 ## Goal
 
@@ -43,12 +44,13 @@ Added:
 - `yi_account_credentials.py`
 - `tests/test_yi_account_credentials.py`
 - `tools/phase3_pppp_probe/run_phase6d_account_handoff_smoke.sh`
+- `tools/phase3_pppp_probe/run_phase6d_haos_account_handoff.sh`
 
 Updated:
 
 - `yi_addon_service.py`
 
-The App startup JSON also now includes secret-safe `account_configured` state.
+The App startup JSON also includes secret-safe `account_configured` state.
 
 ## Development gate — PASS
 
@@ -73,18 +75,41 @@ PHASE6D_ACCOUNT_HANDOFF_SMOKE=PASS
 
 This proves the authenticated API contract, validation/persistence boundary, secret-safe responses, App build-context inclusion, and clean packaging before touching the real HA OS account state.
 
-## HA OS live gate
+## HA OS updated App/security gate — PASS
 
-Rebuild the Local App with the updated bundle, then prove:
+The rebuilt Local App started with the expected empty-account state:
 
-1. startup remains healthy with the existing empty account state;
-2. unauthenticated `GET/POST /api/v1/account` are rejected;
-3. authenticated account status returns `configured=false` before handoff;
-4. a controlled credential handoff validates the real YI account and persists mode-0600 state without echoing secrets;
-5. backend discovery returns the expected secret-safe camera inventory count;
-6. no camera runtime auto-starts just because the account was configured;
-7. after App restart, `account_configured=true`, discovery succeeds, and credentials remain secret.
+```text
+Backend API token reused; mode=600; value_exposed=false.
+{"service":"yi-home-addon","api_version":"v1","bind":"0.0.0.0","port":8099,"authentication":"bearer","runtime_lifecycle_ready":true,"reprobe_ready":true,"media_publisher_enabled":true,"persistence_enabled":true,"managed_runtime_count":0,"account_configured":false,"initial_discovery_ok":false,"discovery_retry_enabled":true,"secrets_exposed":false}
+Published YI Home discovery information to Home Assistant.
+YI Home backend is ready.
+```
 
-The HA internal app hostname for a locally installed app is derived from `{REPO}_{SLUG}` with underscores replaced by hyphens for DNS; for this App the expected internal hostname is `local-yi-home`. This will be verified from the SSH App before using it for the live API call.
+The internal Local App hostname resolved as `local-yi-home`. An unauthenticated request to `GET /api/v1/account` returned HTTP `401` with the secret-safe `unauthorized` error and `secrets_exposed=false`.
+
+This proves the live HA OS endpoint is reachable only with the App bearer credential and that configuring the account has not auto-started any camera runtime.
+
+## Live handoff helper
+
+`run_phase6d_haos_account_handoff.sh` performs the temporary live-gate handoff without echoing secrets:
+
+- reads the existing private `.env.local` used for prior live tests;
+- sends the JSON body over encrypted SSH stdin rather than command-line arguments;
+- obtains the YI Home App API token from Supervisor `/discovery` inside Terminal & SSH using `SUPERVISOR_TOKEN`;
+- never prints either Supervisor/App bearer token or the YI account password;
+- prints only the secret-safe account API status/result.
+
+This helper is a development/live-gate tool only. The final product flow remains Home Assistant Integration UI → authenticated App API.
+
+## Remaining HA OS live gate
+
+Prove:
+
+1. authenticated account status is `configured=false` before handoff;
+2. real-account handoff validates against YI and persists mode `0600` without echoing secrets;
+3. backend discovery returns the expected secret-safe camera inventory count;
+4. `managed_runtime_count` remains `0` immediately after account configuration;
+5. after App restart, `account_configured=true`, initial discovery succeeds, credentials remain secret, and no unwanted camera runtime is started.
 
 Do not paste the App API token, YI password, YI cloud tokens or raw camera connection material into checkpoints or chat.
