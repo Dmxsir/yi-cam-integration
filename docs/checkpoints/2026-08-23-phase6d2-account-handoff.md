@@ -5,6 +5,8 @@
 - Phase 6D.1 packaging: COMPLETE.
 - HA OS bootstrap: COMPLETE.
 - **Phase 6D.2: ACTIVE.**
+- Phase 6D.2 development/unit/API packaging gate: **PASS**.
+- Next live gate: rebuild the HA OS Local App, then perform authenticated account handoff against the real YI account.
 
 ## Goal
 
@@ -48,22 +50,30 @@ Updated:
 
 The App startup JSON also now includes secret-safe `account_configured` state.
 
-## Development gate
+## Development gate — PASS
 
-Run:
-
-```bash
-PYTHON=~/Documents/yi-cam-integration/.venv/bin/python \
-  bash tools/phase3_pppp_probe/run_phase6d_account_handoff_smoke.sh
-```
-
-Required final marker:
+Live development smoke returned:
 
 ```text
+OK
+account_handoff_unit_tests=PASS
+account_handoff_authenticated_api=PASS
+account_handoff_secret_persistence=PASS
+app_context=/home/asaf/Documents/yi-cam-integration-phase3/yi_home
+runtime_source=/home/asaf/Documents/yi-cam-integration-phase3/.analysis/phase3/bionic-root
+python_source_count=38
+runtime_manifest=/home/asaf/Documents/yi-cam-integration-phase3/yi_home/rootfs/opt/yi-home/runtime-manifest.json
+secret_files_copied=false
+PHASE6D_APP_CONTEXT_PREPARE=PASS
+account_handoff_app_packaging=PASS
+account_handoff_build_context_secret_scan=PASS
+production_modified=false
 PHASE6D_ACCOUNT_HANDOFF_SMOKE=PASS
 ```
 
-## HA OS gate after development smoke
+This proves the authenticated API contract, validation/persistence boundary, secret-safe responses, App build-context inclusion, and clean packaging before touching the real HA OS account state.
+
+## HA OS live gate
 
 Rebuild the Local App with the updated bundle, then prove:
 
@@ -74,5 +84,7 @@ Rebuild the Local App with the updated bundle, then prove:
 5. backend discovery returns the expected secret-safe camera inventory count;
 6. no camera runtime auto-starts just because the account was configured;
 7. after App restart, `account_configured=true`, discovery succeeds, and credentials remain secret.
+
+The HA internal app hostname for a locally installed app is derived from `{REPO}_{SLUG}` with underscores replaced by hyphens for DNS; for this App the expected internal hostname is `local-yi-home`. This will be verified from the SSH App before using it for the live API call.
 
 Do not paste the App API token, YI password, YI cloud tokens or raw camera connection material into checkpoints or chat.
