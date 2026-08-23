@@ -7,10 +7,12 @@
 - Phase 6D.2 Integration → App account credential handoff and restart persistence: **COMPLETE**.
 - Home Assistant device/entity registration: **PASS** — 7 cameras, 3 entities per camera (21 entities total).
 - Phase 6D.3 short-run one-camera HA OS media: **PASS**.
-- **Phase 6D.3 long-run one-camera HA OS media: FAIL / ACTIVE INVESTIGATION.**
 - Exact pinned image 10-minute host-network long-run: **PASS**.
 - Exact pinned image 10-minute Docker bridge/NAT long-run: **PASS**.
-- Multi-camera HA OS gate: **BLOCKED** until the HA OS-specific long-run failure is isolated.
+- HA OS one-camera AppArmor-enabled long-run: **FAIL** — observed `exit=75` and `exit=1` runtime recreation.
+- HA OS one-camera AppArmor-disabled 10-minute A/B: **PASS**.
+- **Current root-cause direction: AppArmor policy restriction strongly isolated; exact missing rule still pending.**
+- Multi-camera HA OS gate remains blocked until the restrictive profile is corrected and re-proven.
 
 ## Architecture at this checkpoint
 
@@ -61,100 +63,54 @@ Alpine + QEMU 8.2.2 + FFmpeg 8.0.1 = FAIL around 25–30 s
 Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 ```
 
-A full backend/lifecycle/go2rtc test with the normal App QEMU 10.1.5 and FFmpeg 6.0.1-static passed 150 seconds:
+A full backend/lifecycle/go2rtc test with the normal App QEMU 10.1.5 and FFmpeg 6.0.1-static passed 150 seconds with `restart_count=0` and continuous publication. FFmpeg 8.0.1 remains excluded; the App pins FFmpeg/ffprobe 6.0.1-static by SHA-256.
+
+## HA OS failure evidence with AppArmor profile enabled
+
+After the FFmpeg pin, PTZ initially streamed successfully but longer operation produced runtime recreation. Observed outcomes included:
 
 ```text
-restart_count=0
-last_exit_code=null
-publisher_attached=true
-publisher_error=null
-published_bytes=22020096
-```
-
-Therefore the 20–30 second regression was specific to FFmpeg 8.0.1, not QEMU.
-
-The App Dockerfile now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256 instead of installing Alpine's unpinned `ffmpeg` package. Build smoke verifies the exact pinned version.
-
-## HA OS short-run proof after FFmpeg pin
-
-After rebuilding `local_yi_home`, PTZ initially remained healthy long enough to publish more than 31 MB:
-
-```text
-desired_running=true
-process_alive=true
-restart_count=0
-last_reason=started
-last_exit_code=null
-publisher_attached=true
-published_bytes=31719424
-publisher_error=null
-```
-
-This proved the FFmpeg 8 short-run regression was removed, but it was **not sufficient to close the long-run live-stream gate**.
-
-## HA OS long-run failure evidence
-
-Keeping the same PTZ stream enabled longer produced runtime recreations including:
-
-```text
-desired_running=true
-process_alive=true
 restart_count=3
-last_reason=recreated_after_exit
 last_exit_code=75
+last_reason=recreated_after_exit
 publisher_attached=true
-published_bytes=2228224
 publisher_error=null
 ```
 
-Later two-camera observation also showed relay exits with `last_exit_code=1` on both PTZ and pool, while current generations could continue publishing. Therefore two distinct observed failure outcomes exist: watchdog media-stall recreation (`75`) and relay/native/mux failure (`1`).
-
-`published_bytes` is generation-local and resets when a new runtime generation is launched.
-
-Exit code `75` is emitted by `yi_native_session_supervisor.py` when no relay stdout bytes arrive for the configured startup/stall window. For an already-started stream this means at least 12 seconds without new MPEG-TS bytes, followed by termination/recreation of the relay process group.
-
-The old `ValueError: read of closed file` traceback visible in App logs belongs to a previous deployment before the publisher shutdown-race fix and is not evidence for the current failure.
-
-## Exact pinned image 10-minute host-network long-run — PASS
-
-The exact current `yi-home:phase6d` image was tested on the development laptop using FFmpeg 6.0.1-static, QEMU 10.1.5, full persistent backend, production lifecycle manager/12-second watchdog, shared managed go2rtc, PTZ only, no RTSP consumer and Docker `--network host`.
-
-Result over 600 seconds:
+and later:
 
 ```text
-restart_count=0 for every sample
-last_exit_code=null
+restart_count=2
+last_exit_code=1
+publisher_attached=true
+publisher_error=null
+```
+
+Exit `75` is the media-stall watchdog. Exit `1` is a relay/native/mux failure path. The old `ValueError: read of closed file` traceback in App logs belongs to a prior deployment before the publisher shutdown-race fix and is not current evidence.
+
+## Exact pinned image long-run outside HA OS
+
+### Host networking — PASS
+
+600-second PTZ run:
+
+```text
 generation=1
-process_alive=true
+restart_count=0
+last_exit_code=null
 publisher_attached=true
 publisher_error=null
 published_bytes=93192192
-producer_registered=true
-producer_media_ready=true
-publisher_ready=true
 ```
 
-`published_bytes` increased monotonically from 1,572,864 at 15 seconds to 93,192,192 at 600 seconds. No runtime recreation occurred.
+### Docker bridge/NAT — PASS
 
-## Exact pinned image 10-minute Docker bridge/NAT long-run — PASS
-
-The same exact image was then tested again with normal Docker bridge networking, explicitly removing `--network host` while keeping the rest of the runtime path equivalent.
-
-Verified network mode:
+Second 600-second PTZ run using normal Docker bridge networking:
 
 ```text
-bridge
-backend_ready=PASS
-```
-
-Result over 600 seconds:
-
-```text
-generation=1 for every sample
-restart_count=0 for every sample
+generation=1
+restart_count=0
 last_exit_code=null
-last_reason=started
-process_alive=true
 publisher_attached=true
 publisher_error=null
 published_bytes=81264640
@@ -163,36 +119,94 @@ producer_media_ready=true
 publisher_ready=true
 ```
 
-`published_bytes` increased monotonically from 1,245,184 at 15 seconds to 81,264,640 at 600 seconds. Runtime logging showed PPPP connect/auth success, `media_started=true`, and uninterrupted MPEG-TS progress through more than 80 MB with no stall or relay failure.
+Runtime log showed PPPP connect/auth success, `media_started=true`, and uninterrupted MPEG-TS progress through more than 80 MB.
 
-This rules out ordinary Docker bridge/NAT as the cause of the HA OS failure.
+These two tests rule out the pinned image, FFmpeg 6.0.1, QEMU 10.1.5, ordinary Docker bridge/NAT, lifecycle, persistence, availability polling and shared go2rtc as the primary cause.
+
+## HA OS read-only evidence
+
+No correlated YI-specific AppArmor denial, OOM kill or cgroup throttling event was obtained from the available HA OS logs. A previously pasted `dmesg` capture was later identified as development-laptop output and was therefore not used as HA OS evidence.
+
+Because audit collection may not expose every denied operation in the available shell environment, a controlled one-variable AppArmor A/B was performed.
+
+## HA OS AppArmor-disabled one-camera A/B — PASS
+
+The local App source was changed temporarily from:
+
+```text
+apparmor: true
+```
+
+to:
+
+```text
+apparmor: false
+```
+
+After local App rebuild/start, Supervisor reported:
+
+```text
+apparmor: disable
+state: started
+```
+
+All other important variables were intentionally preserved: same HA OS host, same App image/runtime, same FFmpeg 6.0.1, same QEMU 10.1.5, same bridge networking, same backend/lifecycle/go2rtc path and PTZ only.
+
+Observed immediately after stream start:
+
+```text
+State: running
+Desired: True
+Process: True
+Restarts: 0
+Reason: started
+Exit: None
+Publisher: True
+Bytes: 23461888
+Error: None
+```
+
+Observed after roughly ten minutes:
+
+```text
+State: running
+Desired: True
+Process: True
+Restarts: 0
+Reason: started
+Exit: None
+Publisher: True
+Bytes: 80150528
+Error: None
+```
+
+No runtime recreation occurred during the diagnostic window and publication bytes continued increasing.
 
 ## Current conclusion
 
-- FFmpeg 8.0.1 definitely caused the early 20–30 second stall and remains excluded.
-- FFmpeg 6.0.1 fixes that regression.
-- The exact pinned image is stable for at least 600 seconds with both host networking and normal Docker bridge/NAT on the development machine.
-- Native PPPP/TNP, QEMU 10.1.5, FFmpeg 6.0.1, lifecycle, persistence, availability polling and shared go2rtc are all proven stable in that environment.
-- Ordinary Docker bridge/NAT is now ruled out.
-- The remaining failure is HA OS/App-environment specific.
-- Leading remaining categories are AppArmor/protected-mode restrictions, HA OS/Supervisor-specific network/firewall behavior beyond ordinary Docker bridge, cgroup/resource scheduling/host load, or another HA OS-specific runtime constraint.
+The evidence now strongly isolates the restrictive AppArmor profile as the HA OS-specific failure source:
 
-## Next isolation gate — read-only HA OS host evidence
+- AppArmor profile enabled on HA OS: repeated long-run runtime recreation (`75` and `1`).
+- Same HA OS App with AppArmor disabled: stable for roughly ten minutes, restart count 0, continuous publication.
+- Same exact image outside HA OS: stable for 600 seconds under both host networking and Docker bridge/NAT.
 
-Before weakening the App security model, collect HA OS host and Supervisor logs around a one-camera failure and search for:
+This does **not** justify shipping with AppArmor disabled. The product target remains protected, least-privilege operation. The next step is to identify the smallest missing AppArmor permission, restore `apparmor: true`, and prove long-run stability again.
+
+## Next isolation gate — AppArmor rule narrowing
+
+Current profile already allows broad file access plus IPv4/IPv6 stream and datagram sockets, but does not allow other network families generically and contains no capability grants.
+
+First diagnostic should preserve AppArmor enforcement while temporarily broadening only the network mediation class:
 
 ```text
-apparmor / DENIED / audit
-OOM / out of memory / killed process
-cgroup / throttling / resource pressure
-local_yi_home / qemu / ffmpeg
+network,
 ```
 
-If the host logs show an AppArmor denial or OOM/resource event correlated with a runtime recreation, follow that evidence directly.
+If a 10-minute HA OS PTZ run becomes stable with AppArmor enabled + broad network permission, narrow that broad rule toward the actual extra network family/type required by the native PPPP runtime (likely a non-INET control/introspection socket such as netlink, pending proof).
 
-If the logs are clean, perform a temporary one-variable HA OS A/B with AppArmor disabled for the local development App only, preserving bridge networking and all media/runtime settings. If that test remains stable for at least ten minutes, AppArmor becomes the root cause; if it still fails, restore AppArmor immediately and move to HA OS-specific scheduling/cgroup/network-firewall diagnostics.
+If AppArmor enabled + broad `network,` still fails, restore the original network rules and test the next AppArmor class separately rather than shipping a broad profile.
 
-Do not enable a second HA camera until the one-camera HA OS-specific difference is isolated.
+Do not proceed to multi-camera HA OS testing until AppArmor is re-enabled and the corrected restrictive profile passes long-run one-camera validation.
 
 ## Security
 
