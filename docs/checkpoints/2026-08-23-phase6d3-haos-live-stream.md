@@ -32,47 +32,31 @@ Docker bridge/NAT:
   published_bytes=81264640
 ```
 
-The bridge run also showed continuous PPPP/TNP authentication and MPEG-TS progress. Ordinary Docker bridge/NAT is therefore ruled out.
+Ordinary Docker bridge/NAT is therefore ruled out.
 
 ## HA OS failure evidence
 
-On HA OS the PTZ runtime repeatedly recreates after apparently healthy publication. `published_bytes` is generation-local and resets on recreation; current-generation `publisher_attached=true` does not explain the previous generation's exit.
+On HA OS the PTZ runtime repeatedly recreates after apparently healthy publication. `published_bytes` is generation-local and resets on recreation; current-generation `publisher_attached=true` does not describe the previous generation's failure.
 
-Historical outcomes included generic `exit=1`, watchdog `exit=75`, and later structured diagnostics. A useful sequence from the refined deployment was:
-
-```text
-restart_count=1  last_exit_code=75
-restart_count=3  last_exit_code=85
-restart_count=4  last_exit_code=75
-```
-
-After exception-type refinement, one generation produced:
+Structured diagnostics progressively narrowed two independent failure paths:
 
 ```text
-restart_count=1  last_exit_code=88
+95 = malformed/corrupt AAC unit validation
+76 = post-start media stall while both QEMU/native worker and FFmpeg remain alive
+103 = same qemu+ffmpeg-alive stall, specifically while the relay is blocked writing H.264 into FFmpeg
 ```
 
-`88` identified an uncaught relay `RuntimeError`. A further safe sub-stage classifier then identified the actual RuntimeError family as:
-
-```text
-restart_count=1  last_exit_code=95
-```
-
-`95` means **audio/AAC unit validation failure** inside the live relay. This narrowed one failure path to malformed/corrupt channel-1 audio records rather than AppArmor, Docker networking, FFmpeg startup, or a generic process exit.
+The AAC path was fixed by treating isolated malformed channel-1 packets as recoverable and dropping only that packet. After deployment, `95` stopped being the observed failure and the remaining instability consistently followed the media-stall path.
 
 ## AAC recovery fix
 
-The native worker already frames each media record atomically before writing it to the Python relay. One malformed channel-1 audio unit therefore should not tear down an otherwise healthy H.264 session.
-
-`yi_native_av_relay.py` now raises `AudioUnitValidationError` only for packet-level audio validation failures such as malformed TNP audio structure, unexpected AAC codec, invalid/decrypted ADTS framing, or invalid ADTS sample-rate index. The continuous live loop drops only that isolated audio record and continues. Session/config invariants such as a bad AES key length remain fatal.
+`yi_native_av_relay.py` raises `AudioUnitValidationError` for packet-level audio validation failures. The continuous live loop drops only that isolated audio record and continues. Session/config invariants remain fatal.
 
 Safe logs expose only a count:
 
 ```text
 audio_validation_drop_count=<n>; action=drop_and_continue
 ```
-
-No raw audio bytes, credentials or exception text are exposed.
 
 Relevant commits:
 
@@ -81,116 +65,131 @@ Relevant commits:
 4effefa7  Test recoverable malformed AAC unit handling
 ```
 
-After this fix was deployed, the next observed restart was **not `95`**. It was `75`, which confirms that at least one separate post-start stall path remains.
+## AppArmor — ruled out
 
-## AppArmor investigation — ruled out as primary cause
+Repeated A/B tests with enforcing, broadened rules, complain-style experiments, and `apparmor: false` did not correlate with stability. AppArmor is not the root cause. The product stays on the normal restrictive profile.
 
-A first HA OS run with AppArmor disabled remained stable for roughly ten minutes, which initially made the AppArmor policy a strong suspect. That correlation did not survive repeat testing.
+## Child liveness and blocking-stage diagnostics
 
-Controlled follow-up tests with AppArmor enforcing still failed after broadening these policy classes independently:
-
-```text
-network,
-signal,
-unix, + capability, + ptrace,
-```
-
-A complain-flag experiment also continued to recreate with `exit=1`, and the available HA OS shell/log surfaces did not expose useful YI-specific audit events.
-
-Most decisively, a repeat run with `apparmor: false` also failed within a few minutes with `restart_count=2` and `exit=1`.
-
-Therefore AppArmor is **not the root cause**. The product remains on the normal restrictive AppArmor profile; no broad policy relaxation is justified.
-
-## Structured failure-stage diagnostics
-
-The stable-id relay adapter maps only fixed, secret-safe failure classes to process exit codes. It does not expose exception messages, raw log lines, camera credentials, UID/DID, PPPP key material or connection material.
-
-Current codes:
+The supervisor first depended on `/proc` for descendant state, which was unavailable on HA OS at the critical moment. A relay-owned `0600` marker now reports only fixed safe fields from direct process handles. The first useful result was:
 
 ```text
-74 = startup stall before first MPEG-TS bytes
-75 = post-start media stall; child process state unavailable
-76 = post-start stall; qemu-aarch64 alive, ffmpeg alive
-77 = post-start stall; qemu-aarch64 alive, ffmpeg missing
-78 = post-start stall; qemu-aarch64 missing, ffmpeg alive
-79 = post-start stall; qemu-aarch64 missing, ffmpeg missing
-81 = native PPPP/TNP worker exited non-zero
-82 = FFmpeg MPEG-TS mux exited non-zero
-83 = zero video frames
-84 = zero audio frames
-85 = other uncaught relay exception
-86 = safely unclassified relay failure
-87 = relay EOFError
-88 = relay RuntimeError not otherwise classified
-89 = relay subprocess TimeoutExpired
-90 = relay BrokenPipeError
-91 = relay OSError
-92 = relay ValueError
-93 = native stream header/framing RuntimeError
-94 = invalid native media record RuntimeError
-95 = audio unit validation RuntimeError family
-96 = AAC format changed during live session
-97 = H.264/video unit validation RuntimeError
-98 = native worker pipe setup RuntimeError
+exit=76
 ```
 
-The startup/media distinction is now explicit: after deploying the `74` split, another PTZ run still returned `75`. That proves the failure occurred **after media had started**, not during startup.
+This proved both QEMU/native worker and FFmpeg were still alive while MPEG-TS had stopped for the 12-second watchdog interval.
 
-## Why `75` remained ambiguous on HA OS
-
-The first stall classifier attempted to inspect:
+A second refinement added one allowlisted relay blocking stage. The resulting long HA OS run produced:
 
 ```text
-/proc/<relay-pid>/task/<relay-pid>/children
+restart_count=48
+last_exit_code=103
 ```
 
-On HA OS this returned unavailable at the stall point, so the supervisor could not convert `75` into `76–79` even though the relay itself directly owns the QEMU and FFmpeg `Popen` handles.
+after more than one hour of PTZ-only testing.
 
-Continuing to depend on `/proc` would therefore leave the most important stall branch ambiguous.
-
-## Relay-owned child-state marker
-
-The next diagnostic no longer depends on `/proc` as the primary source.
-
-`yi_native_av_relay.py` now runs a lightweight daemon reporter that polls only its own direct process handles and atomically writes a `0600` marker containing exactly two booleans:
+`103` means:
 
 ```text
-qemu_alive=0|1
-ffmpeg_alive=0|1
+QEMU/native worker: alive
+FFmpeg: alive
+relay blocking point: video_pipe.write(H264 -> FFmpeg)
 ```
 
-The outer session supervisor creates a unique marker path under `/tmp`, passes it via `YI_PHASE3_CHILD_STATE_MARKER`, and reads that marker when a post-start stall fires. `/proc` remains only a development fallback.
+This is strong evidence of **live FFmpeg input backpressure / cross-stream deadlock**, not a crashed process, startup failure, AppArmor issue, Docker NAT issue, or generic PPPP termination.
 
-The marker contains no PID, command line, camera identity, credentials, token, UID/DID, PPPP material, media bytes or exception text.
+## Interleave-bound A/B — failed to resolve 103
+
+A targeted A/B kept the existing architecture but added this live-only FFmpeg option:
+
+```text
+-max_interleave_delta 500000
+```
+
+The finite validation/file path remained unchanged. The intent was to prevent a delayed/sparse audio stream from allowing long mux interleave buffering.
+
+Result: **FAIL as a fix**. Over the following hour the PTZ runtime accumulated 48 restarts and the latest structured exit remained `103`.
+
+Therefore lowering mux interleave delay alone is insufficient. The root design problem is that the Python relay feeds both FFmpeg inputs from one thread: once the H.264 pipe blocks, that same thread cannot continue consuming native media or feed an AAC packet that FFmpeg may require before draining more video.
+
+Relevant commits for the failed interleave A/B:
+
+```text
+8ab5631c  Bound live FFmpeg interleave buffering after video pipe stalls
+a1a16841  Test bounded live FFmpeg interleave command
+```
+
+## Current fix under test — independent FFmpeg input writers
+
+The stable-id live adapter now keeps the 500 ms interleave bound but decouples the two FFmpeg input pipes behind independent daemon writer threads:
+
+```text
+native relay main loop
+  -> video queue -> dedicated H.264 writer -> FFmpeg video pipe
+  -> audio queue -> dedicated AAC writer  -> FFmpeg audio pipe
+```
+
+The main native relay no longer blocks directly in `video_pipe.write()` or `audio_pipe.write()` during live stdout publication. A blocked video writer therefore cannot prevent AAC from reaching FFmpeg, and a blocked audio writer cannot prevent H.264 from being consumed from the native PPPP stream.
+
+Important properties:
+
+- live/stdout path only;
+- finite validation/file path unchanged;
+- no media packets intentionally dropped;
+- writer failures surface back to the existing safe exception classifier on subsequent producer writes;
+- blocked writer state remains visible to the existing secret-safe watchdog marker;
+- no PID, command line, camera identity, media payload or credential is persisted in diagnostics.
 
 Relevant commits:
 
 ```text
-2c669521  Use relay-owned child state for stall diagnostics
-873b29e7  Report secret-safe relay child liveness
-4eead17a  Test relay-owned stall state markers
-4a0712e5  Test secret-safe relay child state marker
+dee48d80  Decouple live FFmpeg video and audio pipe writers
+e7e3e2af  Test independent live FFmpeg input writers
+```
+
+## Current diagnostic codes
+
+```text
+74 = startup stall before first MPEG-TS bytes
+75 = post-start media stall; process state unavailable
+76 = qemu + ffmpeg alive; stage unavailable
+77 = qemu alive, ffmpeg missing
+78 = qemu missing, ffmpeg alive
+79 = qemu + ffmpeg missing
+81 = native worker exited non-zero
+82 = FFmpeg mux exited non-zero
+83 = zero video frames
+84 = zero audio frames
+85 = other relay exception
+86 = safely unclassified relay failure
+87 = relay EOFError
+88 = relay RuntimeError
+89 = subprocess timeout
+90 = BrokenPipeError
+91 = OSError
+92 = ValueError
+93 = native header/framing failure
+94 = invalid native media record
+95 = AAC unit validation
+96 = AAC format changed
+97 = H.264 validation
+98 = worker pipe setup failure
+100 = qemu+ffmpeg alive; waiting for native header
+101 = qemu+ffmpeg alive; waiting for native payload
+102 = qemu+ffmpeg alive; blocked writing AAC to FFmpeg
+103 = qemu+ffmpeg alive; blocked writing H.264 to FFmpeg
+104 = qemu+ffmpeg alive; mux startup
+105 = qemu+ffmpeg alive; packet processing
 ```
 
 ## Next gate
 
 1. Keep `apparmor: true` and PTZ-only scope.
-2. Deploy the latest `yi_native_session_supervisor.py` and `yi_native_av_relay.py` together.
-3. Run PTZ until the first recreation; no long wait is required.
-4. Record `last_exit_code`.
-5. Follow the resulting branch:
-
-```text
-76 -> QEMU/native worker and FFmpeg both alive: investigate source starvation / pipe / mux deadlock
-77 -> QEMU alive, FFmpeg missing: focus on FFmpeg mux termination
-78 -> QEMU missing, FFmpeg alive: focus on native worker / PPPP session termination
-79 -> both missing while relay survives: focus on relay child cleanup/lifecycle
-74 -> startup/session establishment issue
-95 -> isolated AAC handling still not sufficient; inspect remaining audio invariant
-other structured code -> follow that exact stage
-```
-
-Do not resume the two-camera gate until one-camera HA OS long-run stability is proven.
+2. Deploy `dee48d80` + `e7e3e2af` after local syntax/unit tests pass.
+3. Restart the App and enable PTZ only.
+4. Target at least 30 minutes with `restart_count=0`; continue to 60 minutes if clean.
+5. If a restart occurs, record the structured exit immediately. A repeated `103` after async writers would mean FFmpeg is not merely waiting for the other input; then the next A/B should isolate video-only vs audio+video rather than adding more timing knobs.
+6. Do not resume the two-camera HA OS gate until one-camera long-run stability is proven.
 
 ## Security
 
