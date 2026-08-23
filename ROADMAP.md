@@ -194,11 +194,11 @@ Exit criteria: PASS. **Phase 6C is complete.**
 
 ### Phase 6D — Home Assistant App/Add-on packaging — ACTIVE
 
-Current packaging direction follows the current 2026 Home Assistant App specification: a repository-level `repository.yaml`, one App folder, explicit Docker `FROM`, `/data` persistence, Supervisor discovery and protected-mode operation. Current Home Assistant documentation also requires an explicit base image because the old implicit `BUILD_FROM` fallback is gone. The initial target remains `amd64`. 
+Current packaging direction follows the current 2026 Home Assistant App specification: a repository-level `repository.yaml`, one App folder, explicit Docker `FROM`, `/data` persistence, Supervisor discovery and protected-mode operation. Current Home Assistant documentation also requires an explicit base image because the old implicit `BUILD_FROM` fallback is gone. The initial target remains `amd64`.
 
-#### Phase 6D.1 — App/container scaffold — ACTIVE
+#### Phase 6D.1 — App/container scaffold — COMPLETE
 
-Implemented initial scaffold:
+Implemented and proven:
 
 - root `repository.yaml`;
 - `yi_home/config.yaml` with `amd64`, experimental stage and RTSP TCP 8554;
@@ -208,30 +208,41 @@ Implemented initial scaffold:
 - `/run.sh` using `/data`, generating a mode-0600 internal API token and publishing `yi_home` Supervisor discovery;
 - backend API binds only inside the App network; RTSP is the only host-mapped service;
 - initial AppArmor profile; no host networking, full access, Docker API or HA config-directory mapping;
-- `tools/prepare_ha_app_context.py` stages the already-proven Python/Bionic/native runtime into the Docker context without copying `.env.local` or credentials;
-- `run_phase6d_app_context_smoke.sh` validates the staged context and can optionally run a Docker build.
+- `tools/prepare_ha_app_context.py` stages the proven Python/Bionic/native runtime into the Docker context without copying `.env.local` or credentials;
+- `PHASE6D_APP_CONTEXT_SMOKE=PASS`;
+- real `linux/amd64` Docker build PASS;
+- packaged Python/cryptography, FFmpeg/ffprobe, QEMU, go2rtc and Bionic/native artifacts validated from inside the image;
+- image secret/state scan PASS;
+- packaged `libPPPP_API.so` still exports `PPPP_CheckDevOnline`;
+- `PHASE6D_DOCKER_IMAGE_SMOKE=PASS`.
 
-Next exit gates:
+Exit criteria: PASS. **Phase 6D.1 is complete.**
 
-1. App-context smoke PASS on the development machine.
-2. Real amd64 Docker build PASS.
-3. HA OS Local App install/start with backend health + Supervisor discovery.
-4. Refine AppArmor only from concrete HA OS audit evidence.
+Next live gate:
 
-#### Phase 6D.2 — Configuration, storage and secrets — PLANNED
+1. Generate a secret-safe Local App bundle.
+2. Copy/extract `yi_home/` under HA OS `/addons`.
+3. Supervisor local build/install/start PASS.
+4. Backend health remains ready with no YI credentials configured yet.
+5. App-generated backend API token persists across App restart.
+6. Supervisor discovery is attempted without leaking YI credentials.
+7. Refine AppArmor only from concrete HA OS audit evidence.
+
+#### Phase 6D.2 — Configuration, storage and secrets — ACTIVE
 
 - Persistent `/data` capability/runtime state already exists.
-- Add authenticated Integration → App YI credential handoff and restrictive credential storage.
-- App-generated internal backend API token is already part of the scaffold; verify persistence/rotation behavior in HA OS.
+- App-generated internal backend API token is implemented; next HA OS gate verifies persistence/permissions under Supervisor.
 - Supervisor discovery passes only internal API connection metadata/token to the Integration.
 - YI credentials never appear in discovery/logs/read APIs/diagnostics.
+- Next implementation step after HA OS bootstrap proof: authenticated Integration → App YI credential handoff and restrictive credential storage.
 
-#### Phase 6D.3 — Networking and health — PLANNED
+#### Phase 6D.3 — Networking and health — ACTIVE
 
 - No host network/full access/Docker API.
 - Backend API internal to the App network.
 - RTSP host exposure only for optional external consumers.
-- Supervisor watchdog will be added after the packaged backend health path is proven from HA OS.
+- HA OS Local App proof will validate packaged startup/health and Supervisor discovery.
+- Supervisor watchdog will be added after the packaged health path is proven from HA OS.
 
 #### Phase 6D.4 — Architecture support — PLANNED
 
