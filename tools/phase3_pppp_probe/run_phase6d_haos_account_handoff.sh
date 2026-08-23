@@ -25,10 +25,33 @@ command -v ssh >/dev/null || fail "ssh is required"
 command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required in Terminal & SSH" >&2; exit 1; }
 : "${SUPERVISOR_TOKEN:?SUPERVISOR_TOKEN is unavailable in Terminal & SSH}"
 DISCOVERY="$(curl -fsS -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" http://supervisor/discovery)"
-APP_TOKEN="$(printf "%s" "$DISCOVERY" | jq -r '\''(.data.discovery // .discovery // []) | map(select(.addon == "local_yi_home" and .service == "yi_home")) | last | .config.token // empty'\'')"
+TOKENS="$(printf "%s" "$DISCOVERY" | jq -r '\''(.data.discovery // .discovery // []) | .[] | select(.addon == "local_yi_home" and .service == "yi_home") | .config.token // empty'\'' | awk '\''NF && !seen[$0]++'\'')"
 unset DISCOVERY
-[ -n "$APP_TOKEN" ] || { echo "ERROR: YI Home discovery token was not found" >&2; exit 1; }
-BEFORE="$(curl -fsS -H "Authorization: Bearer ${APP_TOKEN}" http://local-yi-home:8099/api/v1/account)"
+[ -n "$TOKENS" ] || { echo "ERROR: YI Home discovery token was not found" >&2; exit 1; }
+
+APP_TOKEN=""
+BEFORE=""
+CANDIDATE_COUNT=0
+while IFS= read -r CANDIDATE; do
+  [ -n "$CANDIDATE" ] || continue
+  CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
+  TMP="$(mktemp)"
+  CODE="$(curl -sS -o "$TMP" -w "%{http_code}" -H "Authorization: Bearer ${CANDIDATE}" http://local-yi-home:8099/api/v1/account || true)"
+  if [ "$CODE" = "200" ]; then
+    APP_TOKEN="$CANDIDATE"
+    BEFORE="$(cat "$TMP")"
+    rm -f "$TMP"
+    break
+  fi
+  rm -f "$TMP"
+done <<EOF
+$TOKENS
+EOF
+unset TOKENS CANDIDATE
+
+[ -n "$APP_TOKEN" ] || { printf "ERROR: none of %s YI Home discovery token candidate(s) authenticated against the running App\n" "$CANDIDATE_COUNT" >&2; exit 1; }
+printf "discovery_token_candidates=%s\n" "$CANDIDATE_COUNT"
+printf "authenticated_discovery_token_found=true\n"
 printf "account_status_before=%s\n" "$BEFORE"
 unset BEFORE
 curl -fsS \
