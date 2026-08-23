@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PYTHON="${PYTHON:-python3}"
+APP_DIR="$ROOT/yi_home"
+ROOTFS="$APP_DIR/rootfs"
+RUNTIME="$ROOTFS/opt/yi-home/runtime/bionic-root"
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+"$PYTHON" -m py_compile "$ROOT/tools/prepare_ha_app_context.py"
+echo "python_compile=PASS"
+
+"$PYTHON" "$ROOT/tools/prepare_ha_app_context.py"
+echo "app_context_prepare=PASS"
+
+for file in \
+  "$ROOT/repository.yaml" \
+  "$APP_DIR/config.yaml" \
+  "$APP_DIR/Dockerfile" \
+  "$APP_DIR/run.sh" \
+  "$APP_DIR/apparmor.txt" \
+  "$ROOTFS/opt/yi-home/app/yi_addon_service.py" \
+  "$RUNTIME/system/bin/linker64" \
+  "$RUNTIME/data/local/tmp/yi-online-status/android_pppp_online_probe" \
+  "$RUNTIME/data/local/tmp/yi-online-status/libPPPP_API.so" \
+  "$ROOTFS/opt/yi-home/runtime-manifest.json"; do
+  [[ -e "$file" ]] || fail "required App artifact missing: $file"
+done
+echo "required_app_artifacts=PASS"
+
+if find "$ROOTFS" -type f \( -name '.env' -o -name '.env.local' -o -name 'options.json' -o -name 'backend-api-token' \) -print -quit | grep -q .; then
+  fail "secret/state file leaked into generated build context"
+fi
+echo "build_context_secret_scan=PASS"
+
+if grep -REn '(~/Documents|/home/[^/]+/Documents|\.analysis/phase3)' \
+    "$APP_DIR/Dockerfile" "$APP_DIR/run.sh" >/dev/null; then
+  fail "App runtime still contains a development-machine path"
+fi
+echo "development_paths_removed=PASS"
+
+if ! grep -q '^  - amd64$' "$APP_DIR/config.yaml"; then
+  fail "amd64 is not the declared initial App architecture"
+fi
+if grep -Eq '^(host_network|full_access|docker_api):[[:space:]]*true' "$APP_DIR/config.yaml"; then
+  fail "unsafe Home Assistant App privilege requested"
+fi
+if ! grep -q '^discovery:' "$APP_DIR/config.yaml" || ! grep -q '  - yi_home' "$APP_DIR/config.yaml"; then
+  fail "Supervisor discovery service is not declared"
+fi
+echo "app_security_config=PASS"
+
+if ! grep -q 'bashio::discovery "yi_home"' "$APP_DIR/run.sh"; then
+  fail "run.sh does not publish Supervisor discovery"
+fi
+if ! grep -q 'backend-api-token' "$APP_DIR/run.sh" || ! grep -q 'chmod 0600' "$APP_DIR/run.sh"; then
+  fail "internal API token persistence is not restrictive"
+fi
+if ! grep -q -- '--data-dir /data' "$APP_DIR/run.sh"; then
+  fail "backend persistence is not rooted under /data"
+fi
+echo "startup_policy_wiring=PASS"
+
+if ! readelf -Ws "$RUNTIME/data/local/tmp/yi-online-status/libPPPP_API.so" 2>/dev/null \
+    | grep -E '[[:space:]]PPPP_CheckDevOnline$' >/dev/null; then
+  fail "staged online-status PPPP library lacks PPPP_CheckDevOnline"
+fi
+echo "online_status_runtime_packaged=PASS"
+
+mapfile -d '' PY_FILES < <(find "$ROOTFS/opt/yi-home/app" -maxdepth 1 -type f -name '*.py' -print0)
+[[ "${#PY_FILES[@]}" -gt 0 ]] || fail "no Python application modules were staged"
+"$PYTHON" -m py_compile "${PY_FILES[@]}"
+echo "staged_python_compile=PASS"
+
+if [[ "${YI_PHASE6D_DOCKER_BUILD:-0}" == "1" ]]; then
+  command -v docker >/dev/null || fail "docker is required when YI_PHASE6D_DOCKER_BUILD=1"
+  docker build --pull -t yi-home:phase6d "$APP_DIR"
+  echo "docker_build=PASS"
+else
+  echo "docker_build=SKIPPED"
+fi
+
+echo "production_modified=false"
+echo "PHASE6D_APP_CONTEXT_SMOKE=PASS"
