@@ -9,9 +9,9 @@ can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
 
 For HA OS diagnosis, startup stalls use a distinct exit code. Post-start media
 stalls prefer a relay-owned, secret-safe child-state marker that reports only
-whether the qemu-aarch64 worker and ffmpeg mux are alive. A /proc descendant
-snapshot remains a development fallback. No command lines, PIDs or runtime
-material are surfaced.
+whether the qemu-aarch64 worker and ffmpeg mux are alive plus one fixed blocking
+stage. A /proc descendant snapshot remains a development fallback. No command
+lines, PIDs or runtime material are surfaced.
 """
 
 from __future__ import annotations
@@ -35,7 +35,23 @@ EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE = 76
 EXIT_MEDIA_STALL_QEMU_ALIVE_FFMPEG_MISSING = 77
 EXIT_MEDIA_STALL_QEMU_MISSING_FFMPEG_ALIVE = 78
 EXIT_MEDIA_STALL_QEMU_FFMPEG_MISSING = 79
+EXIT_MEDIA_STALL_NATIVE_HEADER_WAIT = 100
+EXIT_MEDIA_STALL_NATIVE_PAYLOAD_WAIT = 101
+EXIT_MEDIA_STALL_AUDIO_PIPE_WRITE = 102
+EXIT_MEDIA_STALL_VIDEO_PIPE_WRITE = 103
+EXIT_MEDIA_STALL_MUX_STARTING = 104
+EXIT_MEDIA_STALL_RELAY_PROCESSING = 105
 CHILD_STATE_MARKER_ENV = "YI_PHASE3_CHILD_STATE_MARKER"
+
+_ALLOWED_RELAY_STAGES = {
+    "native_header_read",
+    "native_payload_read",
+    "audio_pipe_write",
+    "video_pipe_write",
+    "mux_starting",
+    "audio_processing",
+    "video_processing",
+}
 
 
 def log(message: str) -> None:
@@ -62,8 +78,6 @@ def signal_child_group(child: subprocess.Popen[bytes], sig: signal.Signals) -> N
     except ProcessLookupError:
         return
     except (PermissionError, OSError):
-        # Defensive fallback. With start_new_session=True the child PID is the
-        # process-group ID, so killpg is the normal path.
         if child.poll() is None:
             try:
                 child.send_signal(sig)
@@ -115,8 +129,10 @@ def _create_child_state_marker() -> Path | None:
         return None
 
 
-def _read_child_state_marker(path: Path | None) -> set[str] | None:
-    """Read only the two fixed boolean fields written by the relay."""
+def _read_child_state_marker(
+    path: Path | None,
+) -> tuple[set[str], str | None] | None:
+    """Read fixed child booleans and optional allowlisted relay stage."""
     if path is None:
         return None
     try:
@@ -125,13 +141,20 @@ def _read_child_state_marker(path: Path | None) -> set[str] | None:
         return None
 
     values: dict[str, bool] = {}
+    relay_stage: str | None = None
     for line in raw.splitlines():
         key, separator, value = line.partition("=")
-        if not separator or key not in {"qemu_alive", "ffmpeg_alive"}:
+        if not separator:
             continue
-        if value not in {"0", "1"}:
-            return None
-        values[key] = value == "1"
+        if key in {"qemu_alive", "ffmpeg_alive"}:
+            if value not in {"0", "1"}:
+                return None
+            values[key] = value == "1"
+            continue
+        if key == "relay_stage":
+            if value not in _ALLOWED_RELAY_STAGES:
+                return None
+            relay_stage = value
 
     if set(values) != {"qemu_alive", "ffmpeg_alive"}:
         return None
@@ -141,7 +164,7 @@ def _read_child_state_marker(path: Path | None) -> set[str] | None:
         comms.add("qemu-aarch64")
     if values["ffmpeg_alive"]:
         comms.add("ffmpeg")
-    return comms
+    return comms, relay_stage
 
 
 def _read_proc_children(pid: int) -> list[int] | None:
@@ -193,8 +216,8 @@ def _classify_stall_processes(comms: set[str] | None) -> tuple[int, str]:
     """Map a process snapshot to a secret-safe stall diagnostic exit code."""
     if comms is None:
         return EXIT_MEDIA_STALL, "process_state_unavailable"
-    qemu_alive = any(name == "qemu-aarch64" for name in comms)
-    ffmpeg_alive = any(name == "ffmpeg" for name in comms)
+    qemu_alive = "qemu-aarch64" in comms
+    ffmpeg_alive = "ffmpeg" in comms
     if qemu_alive and ffmpeg_alive:
         return EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE, "qemu_alive_ffmpeg_alive"
     if qemu_alive:
@@ -204,13 +227,53 @@ def _classify_stall_processes(comms: set[str] | None) -> tuple[int, str]:
     return EXIT_MEDIA_STALL_QEMU_FFMPEG_MISSING, "qemu_missing_ffmpeg_missing"
 
 
+def _classify_alive_relay_stage(relay_stage: str | None) -> tuple[int, str] | None:
+    """Refine qemu+ffmpeg-alive stalls by the relay's fixed blocking stage."""
+    mapping = {
+        "native_header_read": (
+            EXIT_MEDIA_STALL_NATIVE_HEADER_WAIT,
+            "qemu_alive_ffmpeg_alive_native_header_wait",
+        ),
+        "native_payload_read": (
+            EXIT_MEDIA_STALL_NATIVE_PAYLOAD_WAIT,
+            "qemu_alive_ffmpeg_alive_native_payload_wait",
+        ),
+        "audio_pipe_write": (
+            EXIT_MEDIA_STALL_AUDIO_PIPE_WRITE,
+            "qemu_alive_ffmpeg_alive_audio_pipe_write",
+        ),
+        "video_pipe_write": (
+            EXIT_MEDIA_STALL_VIDEO_PIPE_WRITE,
+            "qemu_alive_ffmpeg_alive_video_pipe_write",
+        ),
+        "mux_starting": (
+            EXIT_MEDIA_STALL_MUX_STARTING,
+            "qemu_alive_ffmpeg_alive_mux_starting",
+        ),
+        "audio_processing": (
+            EXIT_MEDIA_STALL_RELAY_PROCESSING,
+            "qemu_alive_ffmpeg_alive_relay_processing",
+        ),
+        "video_processing": (
+            EXIT_MEDIA_STALL_RELAY_PROCESSING,
+            "qemu_alive_ffmpeg_alive_relay_processing",
+        ),
+    }
+    return mapping.get(relay_stage)
+
+
 def _media_stall_diagnostic(
     root_pid: int,
     marker_path: Path | None,
 ) -> tuple[int, str, str]:
-    marker_comms = _read_child_state_marker(marker_path)
-    if marker_comms is not None:
+    marker = _read_child_state_marker(marker_path)
+    if marker is not None:
+        marker_comms, relay_stage = marker
         rc, state = _classify_stall_processes(marker_comms)
+        if rc == EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE:
+            refined = _classify_alive_relay_stage(relay_stage)
+            if refined is not None:
+                rc, state = refined
         return rc, state, "relay_marker"
 
     proc_comms = _descendant_comms(root_pid)
