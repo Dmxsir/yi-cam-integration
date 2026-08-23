@@ -30,6 +30,12 @@ _FAILURE_STAGE_BY_EXIT_CODE = {
     90: "relay_broken_pipe",
     91: "relay_os_error",
     92: "relay_value_error",
+    93: "relay_native_stream_header",
+    94: "relay_native_media_record",
+    95: "relay_audio_unit_validation",
+    96: "relay_audio_format_changed",
+    97: "relay_video_unit_validation",
+    98: "relay_worker_pipe_setup",
 }
 
 
