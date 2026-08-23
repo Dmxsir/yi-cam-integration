@@ -12,7 +12,9 @@ BACKEND_PID=""
 mkdir -p /data
 chmod 0700 /data 2>/dev/null || true
 
+TOKEN_STATE="reused"
 if [[ ! -s "${TOKEN_FILE}" ]]; then
+  TOKEN_STATE="created"
   umask 077
   python3 - <<'PY' >"${TOKEN_FILE}"
 import secrets
@@ -20,6 +22,18 @@ print(secrets.token_urlsafe(48))
 PY
 fi
 chmod 0600 "${TOKEN_FILE}"
+TOKEN_MODE="$(python3 - "${TOKEN_FILE}" <<'PY'
+import os
+import stat
+import sys
+
+print(f"{stat.S_IMODE(os.stat(sys.argv[1]).st_mode):03o}")
+PY
+)"
+if [[ "${TOKEN_MODE}" != "600" ]]; then
+  bashio::exit.nok "Backend API token permissions are not restrictive."
+fi
+bashio::log.info "Backend API token ${TOKEN_STATE}; mode=${TOKEN_MODE}; value_exposed=false."
 API_TOKEN="$(cat "${TOKEN_FILE}")"
 
 # Phase 6D.2 will populate this file through the authenticated internal API.
