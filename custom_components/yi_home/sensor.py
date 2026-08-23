@@ -13,6 +13,7 @@ from .entity import YiHomeCameraEntity
 
 _FAILURE_STAGE_BY_EXIT_CODE = {
     1: "relay_failure_legacy",
+    74: "startup_stall",
     75: "media_stall_process_state_unavailable",
     76: "media_stall_qemu_alive_ffmpeg_alive",
     77: "media_stall_qemu_alive_ffmpeg_missing",
