@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -12,12 +13,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api import YiHomeApi, YiHomeApiError
 from .const import DOMAIN
 
+INVENTORY_REFRESH_SECONDS = 300.0
+
 
 class YiHomeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Refresh secret-safe camera state from the YI Home App."""
 
     def __init__(self, hass: HomeAssistant, api: YiHomeApi) -> None:
         self.api = api
+        self._next_inventory_refresh_at = 0.0
         super().__init__(
             hass,
             logger=__import__("logging").getLogger(__name__),
@@ -26,6 +30,17 @@ class YiHomeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
+        # Runtime state is cheap and polled every 30 s. Account inventory is a
+        # cloud operation, so refresh it less frequently. Failure to refresh
+        # cloud metadata must not take healthy existing entities offline.
+        now = time.monotonic()
+        if now >= self._next_inventory_refresh_at:
+            self._next_inventory_refresh_at = now + INVENTORY_REFRESH_SECONDS
+            try:
+                await self.api.discover()
+            except YiHomeApiError:
+                pass
+
         try:
             payload = await self.api.cameras()
         except YiHomeApiError as exc:
