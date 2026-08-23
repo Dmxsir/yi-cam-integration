@@ -90,6 +90,13 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         await self._async_handle_discovery_without_unique_id()
 
         config = dict(discovery_info.config)
+
+        # Compatibility with the first Phase 6D.2 App build, which published
+        # the internal bearer credential as `token`. New App builds publish the
+        # canonical `api_token` key. Never log either value.
+        if not config.get(CONF_API_TOKEN) and config.get("token"):
+            config[CONF_API_TOKEN] = config.pop("token")
+
         required = (CONF_HOST, CONF_PORT, CONF_API_TOKEN)
         if any(not config.get(key) for key in required) or config.get("api_version") != "v1":
             _LOGGER.warning("YI Home Hass.io discovery payload is incomplete or has an unsupported API version")
