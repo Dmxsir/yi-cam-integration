@@ -6,16 +6,17 @@ small CLI exists only to prove Phase 6B without modifying production streams or
 re-introducing camera-name/model whitelists.
 
 For long-running HA OS diagnostics this adapter also converts the relay's
-existing secret-safe terminal summary into distinct process exit codes. The
-lifecycle manager already exposes the last exit code, so this gives Home
-Assistant useful failure-stage observability without exposing raw runtime logs,
-credentials, DIDs, device keys or camera material.
+existing secret-safe terminal summary and exception type into distinct process
+exit codes. The lifecycle manager already exposes the last exit code, so this
+gives Home Assistant useful failure-stage observability without exposing raw
+runtime logs, credentials, DIDs, device keys or camera material.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -29,6 +30,12 @@ EXIT_NO_VIDEO_FRAMES = 83
 EXIT_NO_AUDIO_FRAMES = 84
 EXIT_RELAY_EXCEPTION = 85
 EXIT_RELAY_FAILURE_UNCLASSIFIED = 86
+EXIT_RELAY_EOF = 87
+EXIT_RELAY_RUNTIME_ERROR = 88
+EXIT_RELAY_TIMEOUT = 89
+EXIT_RELAY_BROKEN_PIPE = 90
+EXIT_RELAY_OS_ERROR = 91
+EXIT_RELAY_VALUE_ERROR = 92
 
 _NATIVE_SUMMARY_RE = re.compile(
     r"native_worker_exit=(-?\d+); mpegts_mux_exit=(-?\d+); "
@@ -56,6 +63,23 @@ def _classify_relay_failure(
     if audio_frames == 0:
         return EXIT_NO_AUDIO_FRAMES, "no_audio_frames"
     return EXIT_RELAY_FAILURE_UNCLASSIFIED, "relay_validation_failure"
+
+
+def _classify_relay_exception(exc: Exception) -> tuple[int, str]:
+    """Classify an uncaught relay exception without exposing its message."""
+    if isinstance(exc, EOFError):
+        return EXIT_RELAY_EOF, "relay_eof"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return EXIT_RELAY_TIMEOUT, "relay_timeout"
+    if isinstance(exc, BrokenPipeError):
+        return EXIT_RELAY_BROKEN_PIPE, "relay_broken_pipe"
+    if isinstance(exc, OSError):
+        return EXIT_RELAY_OS_ERROR, "relay_os_error"
+    if isinstance(exc, ValueError):
+        return EXIT_RELAY_VALUE_ERROR, "relay_value_error"
+    if isinstance(exc, RuntimeError):
+        return EXIT_RELAY_RUNTIME_ERROR, "relay_runtime_error"
+    return EXIT_RELAY_EXCEPTION, "relay_exception"
 
 
 def main() -> int:
@@ -108,14 +132,14 @@ def main() -> int:
         try:
             rc = relay.main()
         except Exception as exc:
-            # Do not emit the exception message: it may contain runtime material.
-            # The type and fixed stage label are sufficient for the next
-            # diagnostic gate and are safe to surface through logs/status.
+            # Never emit the exception message: it may contain runtime material.
+            # Exception class plus a fixed stage/code is sufficient for diagnosis.
+            diagnostic_rc, stage = _classify_relay_exception(exc)
             original_log(
-                "safe_failure_stage=relay_exception; "
-                f"exception_type={type(exc).__name__}; diagnostic_exit_code={EXIT_RELAY_EXCEPTION}"
+                f"safe_failure_stage={stage}; "
+                f"exception_type={type(exc).__name__}; diagnostic_exit_code={diagnostic_rc}"
             )
-            return EXIT_RELAY_EXCEPTION
+            return diagnostic_rc
 
         diagnostic_rc, stage = _classify_relay_failure(rc, native_summary)
         if stage is not None:
