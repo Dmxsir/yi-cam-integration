@@ -83,6 +83,10 @@ class YiHomeApi:
         """Return secret-safe camera inventory."""
         return await self._request("GET", "/cameras")
 
+    async def camera_status(self, stable_id: str) -> dict[str, Any]:
+        """Return fresh secret-safe runtime/publication state for one camera."""
+        return await self._request("GET", f"/cameras/{stable_id}/status")
+
     async def start_camera(self, stable_id: str) -> dict[str, Any]:
         """Persist desired-running state and start a camera runtime when possible."""
         return await self._request("POST", f"/cameras/{stable_id}/start")
