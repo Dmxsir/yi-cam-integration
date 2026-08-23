@@ -3,6 +3,7 @@
   "name": "YI Home",
   "codeowners": [],
   "config_flow": true,
+  "dependencies": ["stream"],
   "documentation": "https://github.com/Dmxsir/yi-cam-integration",
   "iot_class": "cloud_polling",
   "requirements": [],
