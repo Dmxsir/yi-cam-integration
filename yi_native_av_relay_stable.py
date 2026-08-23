@@ -5,22 +5,24 @@ The future Add-on will call the reusable camera/runtime core directly. This
 small CLI exists only to prove Phase 6B without modifying production streams or
 re-introducing camera-name/model whitelists.
 
-For long-running HA OS diagnostics this adapter also converts the relay's
-existing secret-safe terminal summary and exception type into distinct process
-exit codes. Known hard-coded RuntimeError messages are classified internally
-into fixed safe stages; the exception message itself is never emitted. The
-lifecycle manager already exposes the last exit code, so Home Assistant gets
-useful failure-stage observability without exposing raw runtime logs,
-credentials, DIDs, device keys or camera material.
+For long-running HA OS diagnostics this adapter converts the relay's existing
+secret-safe terminal summary and exception type into distinct process exit
+codes. It also annotates the relay-owned child-state marker with one fixed,
+secret-safe blocking stage so a post-start watchdog stall can distinguish a
+native source wait from a blocked FFmpeg input pipe. Exception messages, raw
+logs, PIDs, command lines, credentials, DIDs and device keys are never written
+to the marker.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, BinaryIO, Callable
 
 import yi_camera_runtime
 import yi_native_av_relay as relay
@@ -45,6 +47,16 @@ EXIT_RELAY_AUDIO_FORMAT_CHANGED = 96
 EXIT_RELAY_VIDEO_UNIT_VALIDATION = 97
 EXIT_RELAY_WORKER_PIPE_SETUP = 98
 
+SAFE_RELAY_STAGES = {
+    "native_header_read",
+    "native_payload_read",
+    "audio_pipe_write",
+    "video_pipe_write",
+    "mux_starting",
+    "audio_processing",
+    "video_processing",
+}
+
 _NATIVE_SUMMARY_RE = re.compile(
     r"native_worker_exit=(-?\d+); mpegts_mux_exit=(-?\d+); "
     r"video_frames=(\d+); audio_frames=(\d+)"
@@ -58,6 +70,59 @@ _AUDIO_RUNTIME_ERRORS = {
     "decrypted AAC payload has no native ADTS header",
     "invalid native ADTS sample-rate index",
 }
+
+
+class _StagePipe:
+    """Transparent pipe proxy that exposes only a fixed blocking stage."""
+
+    def __init__(
+        self,
+        stream: BinaryIO,
+        stage: str,
+        set_stage: Callable[[str], None],
+    ) -> None:
+        self._stream = stream
+        self._stage = stage
+        self._set_stage = set_stage
+
+    def write(self, data: bytes) -> int | None:
+        self._set_stage(self._stage)
+        try:
+            return self._stream.write(data)
+        finally:
+            self._set_stage("native_header_read")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+def _write_safe_child_state_marker(
+    qemu_alive: bool,
+    ffmpeg_alive: bool,
+    relay_stage: str,
+) -> None:
+    """Atomically publish fixed child booleans plus one allowlisted stage."""
+    if relay_stage not in SAFE_RELAY_STAGES:
+        relay_stage = "native_header_read"
+    raw = os.getenv(relay.CHILD_STATE_MARKER_ENV, "").strip()
+    if not raw:
+        return
+    path = Path(raw)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(
+            f"qemu_alive={1 if qemu_alive else 0}\n"
+            f"ffmpeg_alive={1 if ffmpeg_alive else 0}\n"
+            f"relay_stage={relay_stage}\n",
+            encoding="ascii",
+        )
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    except (OSError, UnicodeError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _classify_relay_failure(
@@ -149,12 +214,20 @@ def main() -> int:
             "safe_descriptor": safe,
         }
 
-    # Keep the proven relay/mux/worker unchanged. Only replace its Phase 3
-    # name/model-specific material resolver with the generic stable-id provider.
     original_resolver = relay.phase3e._fresh_exact_target
     original_log = relay.log
     original_argv = sys.argv
+    original_marker_writer = relay._write_child_state_marker
+    original_read_exact = relay.read_exact
+    original_decrypt_audio = relay.decrypt_audio_unit
+    original_start_ffmpeg = relay.start_ffmpeg
+    original_decode_video = relay.yi_live_relay._decode_video_unit
     native_summary: tuple[int, int, int, int] | None = None
+    relay_stage = "native_header_read"
+
+    def set_stage(stage: str) -> None:
+        nonlocal relay_stage
+        relay_stage = stage if stage in SAFE_RELAY_STAGES else "native_header_read"
 
     def diagnostic_log(message: str) -> None:
         nonlocal native_summary
@@ -163,15 +236,65 @@ def main() -> int:
             native_summary = tuple(int(value) for value in match.groups())  # type: ignore[assignment]
         original_log(message)
 
+    def diagnostic_marker_writer(qemu_alive: bool, ffmpeg_alive: bool) -> None:
+        _write_safe_child_state_marker(qemu_alive, ffmpeg_alive, relay_stage)
+
+    def diagnostic_read_exact(stream: BinaryIO, length: int) -> bytes:
+        set_stage("native_payload_read")
+        try:
+            return original_read_exact(stream, length)
+        finally:
+            set_stage("native_header_read")
+
+    def diagnostic_decrypt_audio(raw: bytes, password: str):
+        set_stage("audio_processing")
+        try:
+            return original_decrypt_audio(raw, password)
+        finally:
+            set_stage("native_header_read")
+
+    def diagnostic_decode_video(channel: int, raw: bytes, password: str, encrypted: bool):
+        set_stage("video_processing")
+        try:
+            return original_decode_video(channel, raw, password, encrypted)
+        finally:
+            set_stage("native_header_read")
+
+    def diagnostic_start_ffmpeg(
+        ffmpeg: str,
+        output: BinaryIO | None,
+        video_offset_ms: int,
+        audio_offset_ms: int,
+    ):
+        set_stage("mux_starting")
+        try:
+            mux, video_pipe, audio_pipe = original_start_ffmpeg(
+                ffmpeg,
+                output,
+                video_offset_ms,
+                audio_offset_ms,
+            )
+            return (
+                mux,
+                _StagePipe(video_pipe, "video_pipe_write", set_stage),
+                _StagePipe(audio_pipe, "audio_pipe_write", set_stage),
+            )
+        finally:
+            set_stage("native_header_read")
+
     try:
         relay.phase3e._fresh_exact_target = fresh_stable_target
         relay.log = diagnostic_log
+        relay._write_child_state_marker = diagnostic_marker_writer
+        relay.read_exact = diagnostic_read_exact
+        relay.decrypt_audio_unit = diagnostic_decrypt_audio
+        relay.start_ffmpeg = diagnostic_start_ffmpeg
+        relay.yi_live_relay._decode_video_unit = diagnostic_decode_video
         sys.argv = [original_argv[0], *remaining]
+        set_stage("native_header_read")
         try:
             rc = relay.main()
         except Exception as exc:
-            # Never emit the exception message: it may contain runtime material.
-            # Exception class plus a fixed stage/code is sufficient for diagnosis.
             diagnostic_rc, stage = _classify_relay_exception(exc)
             original_log(
                 f"safe_failure_stage={stage}; "
@@ -188,6 +311,11 @@ def main() -> int:
     finally:
         relay.phase3e._fresh_exact_target = original_resolver
         relay.log = original_log
+        relay._write_child_state_marker = original_marker_writer
+        relay.read_exact = original_read_exact
+        relay.decrypt_audio_unit = original_decrypt_audio
+        relay.start_ffmpeg = original_start_ffmpeg
+        relay.yi_live_relay._decode_video_unit = original_decode_video
         sys.argv = original_argv
 
 
