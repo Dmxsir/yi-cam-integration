@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.config_entries import ConfigEntry
@@ -10,6 +11,7 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .api import YiHomeApiError
 from .const import CONF_RTSP_PORT
 from .coordinator import YiHomeCoordinator
 from .entity import YiHomeCameraEntity
@@ -59,40 +61,34 @@ class YiHomeLiveCamera(YiHomeCameraEntity, Camera):
         """Generate still images from the same App-owned stream."""
         return True
 
-    @property
-    def is_streaming(self) -> bool:
-        """Return whether App publication currently has live media."""
-        camera = self.camera_data
-        if not isinstance(camera, dict):
-            return False
-        runtime = camera.get("runtime")
-        publication = camera.get("publication")
+    @staticmethod
+    def _stream_ready(runtime: Any, publication: Any) -> bool:
         return bool(
-            isinstance(runtime, dict)
-            and runtime.get("process_alive") is True
-            and isinstance(publication, dict)
-            and publication.get("publisher_ready") is True
-            and publication.get("producer_media_ready") is True
-        )
-
-    async def stream_source(self) -> str | None:
-        """Return the internal App-owned RTSP source when publication is ready."""
-        camera = self.camera_data
-        if not isinstance(camera, dict):
-            return None
-
-        runtime = camera.get("runtime")
-        publication = camera.get("publication")
-        if not (
             isinstance(runtime, dict)
             and runtime.get("process_alive") is True
             and isinstance(publication, dict)
             and publication.get("configured") is True
             and publication.get("publisher_ready") is True
             and publication.get("producer_media_ready") is True
-        ):
+        )
+
+    @property
+    def is_streaming(self) -> bool:
+        """Return whether the latest coordinated state has live media."""
+        camera = self.camera_data
+        if not isinstance(camera, dict):
+            return False
+        return self._stream_ready(camera.get("runtime"), camera.get("publication"))
+
+    def _source_from_status(self, status: dict[str, Any]) -> str | None:
+        if status.get("secrets_exposed") is not False:
+            return None
+        runtime = status.get("runtime")
+        publication = status.get("publication")
+        if not self._stream_ready(runtime, publication):
             return None
 
+        assert isinstance(publication, dict)
         path = publication.get("rtsp_path")
         if not isinstance(path, str) or _SAFE_RTSP_PATH.fullmatch(path) is None:
             return None
@@ -104,3 +100,14 @@ class YiHomeLiveCamera(YiHomeCameraEntity, Camera):
             return None
 
         return f"rtsp://{self._rtsp_host}:{port}{path}"
+
+    async def stream_source(self) -> str | None:
+        """Return a fresh internal App-owned RTSP source when publication is ready."""
+        try:
+            payload = await self.coordinator.api.camera_status(self._stable_id)
+        except YiHomeApiError:
+            return None
+        status = payload.get("status")
+        if not isinstance(status, dict):
+            return None
+        return self._source_from_status(status)
