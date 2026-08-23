@@ -7,9 +7,10 @@ the child stops producing bytes after startup, the wrapper terminates the full
 relay process group and exits non-zero so a persistent go2rtc preload consumer
 can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
 
-For HA OS diagnosis, media-stall exits also encode a best-effort, secret-safe
-snapshot of whether qemu-aarch64 and ffmpeg descendants were still alive when
-the watchdog fired. No command lines, PIDs or runtime material are surfaced.
+For HA OS diagnosis, startup stalls use a distinct exit code, while post-start
+media-stall exits encode a best-effort, secret-safe snapshot of whether
+qemu-aarch64 and ffmpeg descendants were still alive when the watchdog fired.
+No command lines, PIDs or runtime material are surfaced.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 
+EXIT_STARTUP_STALL = 74
 EXIT_MEDIA_STALL = 75
 EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE = 76
 EXIT_MEDIA_STALL_QEMU_ALIVE_FFMPEG_MISSING = 77
@@ -252,10 +254,10 @@ def main() -> int:
             if not started and elapsed >= args.startup_timeout:
                 log(
                     f"startup_stall_detected=true; silence_seconds={elapsed:.1f}; "
-                    "action=terminate_and_recreate"
+                    f"diagnostic_exit_code={EXIT_STARTUP_STALL}; action=terminate_and_recreate"
                 )
                 terminate_child(child, args.terminate_grace)
-                return EXIT_MEDIA_STALL
+                return EXIT_STARTUP_STALL
             if started and elapsed >= args.stall_timeout:
                 diagnostic_rc, process_state = _media_stall_diagnostic(child.pid)
                 log(
