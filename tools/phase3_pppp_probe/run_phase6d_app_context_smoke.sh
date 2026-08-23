@@ -61,10 +61,19 @@ fi
 if ! grep -q 'backend-api-token' "$APP_DIR/run.sh" || ! grep -q 'chmod 0600' "$APP_DIR/run.sh"; then
   fail "internal API token persistence is not restrictive"
 fi
+if ! grep -q 'TOKEN_STATE="reused"' "$APP_DIR/run.sh" \
+    || ! grep -q 'TOKEN_STATE="created"' "$APP_DIR/run.sh" \
+    || ! grep -q 'value_exposed=false' "$APP_DIR/run.sh"; then
+  fail "secret-safe backend token create/reuse marker is missing"
+fi
 if ! grep -q -- '--data-dir /data' "$APP_DIR/run.sh"; then
   fail "backend persistence is not rooted under /data"
 fi
+if ! grep -q '"managed_runtime_count"' "$ROOTFS/opt/yi-home/app/yi_addon_service.py"; then
+  fail "bootstrap runtime-count marker is missing"
+fi
 echo "startup_policy_wiring=PASS"
+echo "restart_persistence_markers=PASS"
 
 if ! readelf -Ws "$RUNTIME/data/local/tmp/yi-online-status/libPPPP_API.so" 2>/dev/null \
     | grep -E '[[:space:]]PPPP_CheckDevOnline$' >/dev/null; then
