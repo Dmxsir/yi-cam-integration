@@ -6,6 +6,10 @@ wrapper only forwards its stdout to go2rtc and watches for forward progress. If
 the child stops producing bytes after startup, the wrapper terminates the full
 relay process group and exits non-zero so a persistent go2rtc preload consumer
 can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
+
+For HA OS diagnosis, media-stall exits also encode a best-effort, secret-safe
+snapshot of whether qemu-aarch64 and ffmpeg descendants were still alive when
+the watchdog fired. No command lines, PIDs or runtime material are surfaced.
 """
 
 from __future__ import annotations
@@ -18,7 +22,15 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import BinaryIO
+
+
+EXIT_MEDIA_STALL = 75
+EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE = 76
+EXIT_MEDIA_STALL_QEMU_ALIVE_FFMPEG_MISSING = 77
+EXIT_MEDIA_STALL_QEMU_MISSING_FFMPEG_ALIVE = 78
+EXIT_MEDIA_STALL_QEMU_FFMPEG_MISSING = 79
 
 
 def log(message: str) -> None:
@@ -81,6 +93,70 @@ def write_all(output: BinaryIO, data: bytes) -> None:
             return
         view = view[written:]
     output.flush()
+
+
+def _read_proc_children(pid: int) -> list[int] | None:
+    try:
+        raw = Path(f"/proc/{pid}/task/{pid}/children").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    if not raw:
+        return []
+    result: list[int] = []
+    for value in raw.split():
+        try:
+            result.append(int(value))
+        except ValueError:
+            continue
+    return result
+
+
+def _read_proc_comm(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+
+
+def _descendant_comms(root_pid: int) -> set[str] | None:
+    """Return descendant process names, or None when /proc cannot be inspected."""
+    first = _read_proc_children(root_pid)
+    if first is None:
+        return None
+    pending = list(first)
+    seen: set[int] = set()
+    comms: set[str] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        comm = _read_proc_comm(pid)
+        if comm:
+            comms.add(comm)
+        children = _read_proc_children(pid)
+        if children:
+            pending.extend(children)
+    return comms
+
+
+def _classify_stall_processes(comms: set[str] | None) -> tuple[int, str]:
+    """Map a process snapshot to a secret-safe stall diagnostic exit code."""
+    if comms is None:
+        return EXIT_MEDIA_STALL, "process_state_unavailable"
+    qemu_alive = any(name == "qemu-aarch64" for name in comms)
+    ffmpeg_alive = any(name == "ffmpeg" for name in comms)
+    if qemu_alive and ffmpeg_alive:
+        return EXIT_MEDIA_STALL_QEMU_FFMPEG_ALIVE, "qemu_alive_ffmpeg_alive"
+    if qemu_alive:
+        return EXIT_MEDIA_STALL_QEMU_ALIVE_FFMPEG_MISSING, "qemu_alive_ffmpeg_missing"
+    if ffmpeg_alive:
+        return EXIT_MEDIA_STALL_QEMU_MISSING_FFMPEG_ALIVE, "qemu_missing_ffmpeg_alive"
+    return EXIT_MEDIA_STALL_QEMU_FFMPEG_MISSING, "qemu_missing_ffmpeg_missing"
+
+
+def _media_stall_diagnostic(root_pid: int) -> tuple[int, str]:
+    return _classify_stall_processes(_descendant_comms(root_pid))
 
 
 def main() -> int:
@@ -179,14 +255,16 @@ def main() -> int:
                     "action=terminate_and_recreate"
                 )
                 terminate_child(child, args.terminate_grace)
-                return 75
+                return EXIT_MEDIA_STALL
             if started and elapsed >= args.stall_timeout:
+                diagnostic_rc, process_state = _media_stall_diagnostic(child.pid)
                 log(
                     f"media_stall_detected=true; silence_seconds={elapsed:.1f}; "
-                    f"forwarded_bytes={total}; action=terminate_and_recreate"
+                    f"forwarded_bytes={total}; stall_process_state={process_state}; "
+                    f"diagnostic_exit_code={diagnostic_rc}; action=terminate_and_recreate"
                 )
                 terminate_child(child, args.terminate_grace)
-                return 75
+                return diagnostic_rc
             if stop_requested:
                 return 0
     finally:
