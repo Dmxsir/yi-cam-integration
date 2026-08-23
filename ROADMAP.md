@@ -28,7 +28,7 @@ Latest checkpoint: [`docs/checkpoints/2026-08-23-phase6d3-haos-live-stream.md`](
 ### Phase 6D.1 — Container/runtime packaging — COMPLETE
 
 - HA OS Local App scaffold and real amd64 image build proven.
-- Persistent `/data`, protected/AppArmor operation and least-privilege networking proven.
+- Persistent `/data`, protected/AppArmor operation and least-privilege networking scaffold proven.
 - go2rtc 1.9.14 pinned by SHA-256.
 - Bionic/native PPPP runtime staged without development credentials/state.
 - Local App bootstrap proven as `local_yi_home` from `/addons/yi_home`.
@@ -64,34 +64,45 @@ Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 
 The App now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256. The normal App QEMU 10.1.5 remains in use.
 
-#### One-camera HA OS long-run gate — ACTIVE / FAILING
+#### One-camera HA OS long-run gate — APPARMOR ROOT-CAUSE DIRECTION ISOLATED
 
-HA OS still shows runtime recreation after longer operation, including both watchdog `exit=75` and relay `exit=1` observations.
+HA OS with the restrictive AppArmor profile enabled showed longer-run runtime recreation, including both watchdog `exit=75` and relay `exit=1` observations.
 
-The same exact pinned image has now passed two independent 10-minute development-host tests:
+The same exact pinned image passed two independent 10-minute development-host tests:
 
 ```text
 Docker host networking:   generation=1, restart_count=0, 93,192,192 bytes
 Docker bridge/NAT:        generation=1, restart_count=0, 81,264,640 bytes
 ```
 
-The bridge test showed continuous PPPP/TNP authentication/media progress through the full 600-second window, so ordinary Docker bridge/NAT is ruled out as the cause.
+Ordinary Docker bridge/NAT is therefore ruled out.
+
+A one-variable HA OS AppArmor A/B was then performed. With the Local App rebuilt as `apparmor: false`, Supervisor reported `apparmor: disable`, and PTZ remained stable for roughly ten minutes:
+
+```text
+restart_count=0
+last_exit_code=None
+publisher_attached=True
+publisher_error=None
+published_bytes: 23,461,888 -> 80,150,528
+```
 
 Current conclusion:
 
-- FFmpeg 6.0.1 fixes the original early FFmpeg 8 regression.
-- The pinned application/runtime stack is stable for at least ten minutes both with host networking and ordinary Docker bridge/NAT outside HA OS.
-- The unresolved failure is HA OS/App-environment specific.
-- Leading remaining categories: AppArmor/protected mode, HA OS/Supervisor-specific firewall/network behavior beyond ordinary Docker bridge, cgroup/resource scheduling/host pressure, or another HA OS runtime constraint.
-- **Do not start the multi-camera HA OS gate yet.**
+- FFmpeg 6.0.1 fixes the original FFmpeg 8 regression.
+- The pinned runtime stack is stable for at least ten minutes both with host networking and ordinary Docker bridge/NAT outside HA OS.
+- The HA OS failure disappears when AppArmor is disabled while the rest of the App/runtime path is preserved.
+- **The AppArmor policy is therefore strongly isolated as the remaining HA OS-specific failure source.**
+- This is a diagnostic result only; the product will not ship with AppArmor disabled.
 
 Next gate:
 
-1. Collect read-only HA OS host/Supervisor evidence around a one-camera failure for AppArmor denials, OOM/killed-process events, cgroup/resource pressure and YI/QEMU/FFmpeg references.
-2. If the logs identify a denial/resource event, follow that evidence directly.
-3. If host logs are clean, run a temporary one-variable HA OS A/B with AppArmor disabled for the local development App only, while preserving bridge networking and the media/runtime configuration.
-4. Restore the security profile immediately after the diagnostic run.
-5. Only after long-run one-camera HA OS stability is proven should two-camera HA OS testing resume.
+1. Re-enable AppArmor.
+2. Temporarily broaden only the AppArmor network class with `network,` while keeping all other profile restrictions intact.
+3. Run PTZ for at least ten minutes.
+4. If stable, narrow the rule to the exact additional socket family/type required by the native PPPP runtime (likely non-INET control/introspection networking such as netlink, pending proof).
+5. If broad network still fails, restore the original network rules and isolate the next AppArmor permission class separately.
+6. Only after the corrected restrictive AppArmor profile passes long-run one-camera validation should multi-camera HA OS testing resume.
 
 ### Phase 6D.4 — Architecture support — PLANNED
 
@@ -103,7 +114,7 @@ Phase 6D exit gate remains:
 - fresh HA OS App install/start;
 - Integration-driven account setup;
 - automatic camera/device/entity discovery;
-- long-running stable App-owned media;
+- long-running stable App-owned media under the final restrictive security profile;
 - at least two simultaneous independent streams;
 - persisted desired-running behavior survives App restart;
 - no terminal/manual UID/DID/model/RTSP/YAML/Android dependency in normal use.
