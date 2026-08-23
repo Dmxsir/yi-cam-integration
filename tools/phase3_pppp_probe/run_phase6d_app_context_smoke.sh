@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
+DOCKER_CMD="${DOCKER_CMD:-docker}"
 APP_DIR="$ROOT/yi_home"
 ROOTFS="$APP_DIR/rootfs"
 RUNTIME="$ROOTFS/opt/yi-home/runtime/bionic-root"
@@ -105,9 +106,11 @@ mapfile -d '' PY_FILES < <(find "$ROOTFS/opt/yi-home/app" -maxdepth 1 -type f -n
 echo "staged_python_compile=PASS"
 
 if [[ "${YI_PHASE6D_DOCKER_BUILD:-0}" == "1" ]]; then
-  command -v docker >/dev/null || fail "docker is required when YI_PHASE6D_DOCKER_BUILD=1"
-  docker build --pull -t yi-home:phase6d "$APP_DIR"
-  docker run --rm --entrypoint /bin/sh yi-home:phase6d -c \
+  read -r -a DOCKER_PARTS <<<"$DOCKER_CMD"
+  [[ "${#DOCKER_PARTS[@]}" -gt 0 ]] || fail "DOCKER_CMD is empty"
+  command -v "${DOCKER_PARTS[0]}" >/dev/null || fail "Docker command is unavailable: ${DOCKER_PARTS[0]}"
+  "${DOCKER_PARTS[@]}" build --pull -t yi-home:phase6d "$APP_DIR"
+  "${DOCKER_PARTS[@]}" run --rm --entrypoint /bin/sh yi-home:phase6d -c \
     'ffmpeg -version 2>&1 | grep -m1 -F "ffmpeg version 6.0.1-static" >/dev/null && ffprobe -version 2>&1 | grep -m1 -F "ffprobe version 6.0.1-static" >/dev/null'
   echo "docker_ffmpeg_pin=PASS"
   echo "docker_build=PASS"
