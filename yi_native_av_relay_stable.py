@@ -7,9 +7,11 @@ re-introducing camera-name/model whitelists.
 
 For long-running HA OS diagnostics this adapter also converts the relay's
 existing secret-safe terminal summary and exception type into distinct process
-exit codes. The lifecycle manager already exposes the last exit code, so this
-gives Home Assistant useful failure-stage observability without exposing raw
-runtime logs, credentials, DIDs, device keys or camera material.
+exit codes. Known hard-coded RuntimeError messages are classified internally
+into fixed safe stages; the exception message itself is never emitted. The
+lifecycle manager already exposes the last exit code, so Home Assistant gets
+useful failure-stage observability without exposing raw runtime logs,
+credentials, DIDs, device keys or camera material.
 """
 
 from __future__ import annotations
@@ -36,11 +38,26 @@ EXIT_RELAY_TIMEOUT = 89
 EXIT_RELAY_BROKEN_PIPE = 90
 EXIT_RELAY_OS_ERROR = 91
 EXIT_RELAY_VALUE_ERROR = 92
+EXIT_RELAY_NATIVE_STREAM_HEADER = 93
+EXIT_RELAY_NATIVE_MEDIA_RECORD = 94
+EXIT_RELAY_AUDIO_UNIT_VALIDATION = 95
+EXIT_RELAY_AUDIO_FORMAT_CHANGED = 96
+EXIT_RELAY_VIDEO_UNIT_VALIDATION = 97
+EXIT_RELAY_WORKER_PIPE_SETUP = 98
 
 _NATIVE_SUMMARY_RE = re.compile(
     r"native_worker_exit=(-?\d+); mpegts_mux_exit=(-?\d+); "
     r"video_frames=(\d+); audio_frames=(\d+)"
 )
+
+_AUDIO_RUNTIME_ERRORS = {
+    "malformed TNP v2 audio unit",
+    "TNP audio size mismatch",
+    "native relay expected AAC codec id 138",
+    "TNP audio AES key is not 16 bytes",
+    "decrypted AAC payload has no native ADTS header",
+    "invalid native ADTS sample-rate index",
+}
 
 
 def _classify_relay_failure(
@@ -65,6 +82,27 @@ def _classify_relay_failure(
     return EXIT_RELAY_FAILURE_UNCLASSIFIED, "relay_validation_failure"
 
 
+def _classify_runtime_error(exc: RuntimeError) -> tuple[int, str]:
+    """Classify only known relay RuntimeErrors without exposing their text."""
+    message = str(exc)
+    if message in {"truncated native stream header", "invalid native stream framing"}:
+        return EXIT_RELAY_NATIVE_STREAM_HEADER, "relay_native_stream_header"
+    if message == "invalid native media record":
+        return EXIT_RELAY_NATIVE_MEDIA_RECORD, "relay_native_media_record"
+    if message in _AUDIO_RUNTIME_ERRORS:
+        return EXIT_RELAY_AUDIO_UNIT_VALIDATION, "relay_audio_unit_validation"
+    if message == "AAC format changed during live session":
+        return EXIT_RELAY_AUDIO_FORMAT_CHANGED, "relay_audio_format_changed"
+    if (
+        message.startswith("Phase 2E expected H.264 codec id 78, got ")
+        or message == "Phase 2E received an unrecognized H.264 payload framing"
+    ):
+        return EXIT_RELAY_VIDEO_UNIT_VALIDATION, "relay_video_unit_validation"
+    if message == "failed to create native worker pipes":
+        return EXIT_RELAY_WORKER_PIPE_SETUP, "relay_worker_pipe_setup"
+    return EXIT_RELAY_RUNTIME_ERROR, "relay_runtime_error"
+
+
 def _classify_relay_exception(exc: Exception) -> tuple[int, str]:
     """Classify an uncaught relay exception without exposing its message."""
     if isinstance(exc, EOFError):
@@ -78,7 +116,7 @@ def _classify_relay_exception(exc: Exception) -> tuple[int, str]:
     if isinstance(exc, ValueError):
         return EXIT_RELAY_VALUE_ERROR, "relay_value_error"
     if isinstance(exc, RuntimeError):
-        return EXIT_RELAY_RUNTIME_ERROR, "relay_runtime_error"
+        return _classify_runtime_error(exc)
     return EXIT_RELAY_EXCEPTION, "relay_exception"
 
 
