@@ -99,7 +99,7 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         self._app_name = discovery_info.name or "YI Home"
         safe_host = str(config[CONF_HOST])
         safe_port = int(config[CONF_PORT])
-        _LOGGER.info(
+        _LOGGER.warning(
             "Received YI Home Hass.io discovery for host=%s port=%s; credentials_exposed=false",
             safe_host,
             safe_port,
@@ -121,7 +121,7 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.error("YI Home backend failed the secret-safety contract during Hass.io discovery")
             return self.async_abort(reason="unsafe_backend")
 
-        _LOGGER.info(
+        _LOGGER.warning(
             "YI Home Hass.io discovery validated for host=%s port=%s account_configured=%s",
             safe_host,
             safe_port,
