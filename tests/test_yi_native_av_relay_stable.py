@@ -153,6 +153,30 @@ class YiNativeAvRelayStableDiagnosticsTests(unittest.TestCase):
                 "relay_stage=native_header_read\n",
             )
 
+    def test_live_ffmpeg_command_bounds_interleave_buffering(self) -> None:
+        original = [
+            "ffmpeg",
+            "-hide_banner",
+            "-f",
+            "mpegts",
+            "pipe:1",
+        ]
+        bounded = stable._bound_live_interleave_command(original)
+        self.assertIsInstance(bounded, list)
+        assert isinstance(bounded, list)
+        self.assertEqual(bounded[-1], "pipe:1")
+        index = bounded.index("-max_interleave_delta")
+        self.assertEqual(
+            bounded[index + 1],
+            str(stable.LIVE_MAX_INTERLEAVE_DELTA_US),
+        )
+        self.assertEqual(stable.LIVE_MAX_INTERLEAVE_DELTA_US, 500_000)
+        self.assertNotIn("-max_interleave_delta", original)
+
+    def test_non_pipe_command_is_not_modified(self) -> None:
+        original = ["ffmpeg", "-f", "mpegts", "capture.ts"]
+        self.assertEqual(stable._bound_live_interleave_command(original), original)
+
 
 if __name__ == "__main__":
     unittest.main()
