@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import yi_native_av_relay_stable as stable
 
@@ -111,6 +115,43 @@ class YiNativeAvRelayStableDiagnosticsTests(unittest.TestCase):
             stable._classify_relay_exception(CustomFailure("secret")),
             (stable.EXIT_RELAY_EXCEPTION, "relay_exception"),
         )
+
+    def test_stage_marker_contains_only_fixed_safe_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "marker"
+            with patch.dict(
+                os.environ,
+                {stable.relay.CHILD_STATE_MARKER_ENV: str(path)},
+                clear=False,
+            ):
+                stable._write_safe_child_state_marker(
+                    True,
+                    True,
+                    "audio_pipe_write",
+                )
+            self.assertEqual(
+                path.read_text(encoding="ascii"),
+                "qemu_alive=1\n"
+                "ffmpeg_alive=1\n"
+                "relay_stage=audio_pipe_write\n",
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_stage_marker_rejects_unknown_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "marker"
+            with patch.dict(
+                os.environ,
+                {stable.relay.CHILD_STATE_MARKER_ENV: str(path)},
+                clear=False,
+            ):
+                stable._write_safe_child_state_marker(True, True, "secret-data")
+            self.assertEqual(
+                path.read_text(encoding="ascii"),
+                "qemu_alive=1\n"
+                "ffmpeg_alive=1\n"
+                "relay_stage=native_header_read\n",
+            )
 
 
 if __name__ == "__main__":
