@@ -79,6 +79,10 @@ class YiHomeApi:
         """Validate and persist YI credentials in the App."""
         return await self._request("POST", "/account", json_body=payload)
 
+    async def discover(self) -> dict[str, Any]:
+        """Ask the App to refresh its YI camera inventory."""
+        return await self._request("POST", "/discover")
+
     async def cameras(self) -> dict[str, Any]:
         """Return secret-safe camera inventory."""
         return await self._request("GET", "/cameras")
