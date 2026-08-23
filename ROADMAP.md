@@ -40,7 +40,7 @@ Home Assistant App packaging requirements are documented in [`docs/home-assistan
 - Media-stall watchdog implemented.
 - Fault injection proved automatic recovery without restarting go2rtc or the unaffected camera.
 
-## Phase 6 — Add-on backend foundation — ACTIVE
+## Phase 6 — Product backend + Home Assistant packaging — ACTIVE
 
 ### Phase 6A — Generic account discovery core — COMPLETE
 
@@ -59,7 +59,7 @@ Exit criteria: PASS.
 
 Exit criteria: PASS.
 
-### Phase 6C — Add-on service/API — ACTIVE
+### Phase 6C — Add-on service/API — COMPLETE
 
 Goal: turn the reusable backend into the long-running engine that will be packaged as the Home Assistant App/Add-on.
 
@@ -148,48 +148,97 @@ Live PTZ + pool proof (2026-08-23) on isolated ports `18103/11985/18555`:
 
 Exit criteria: PASS. Phase 6C.5 is complete.
 
-#### Phase 6C.6 — Persistence/startup policy — ACTIVE
+#### Phase 6C.6 — Persistence, availability and startup policy — COMPLETE
 
-Policy locked:
+Authoritative online/offline source:
+
+- `/v4/devices/list.online` and `state` are not live availability; all seven account cameras reported `online=true, state=1`.
+- The official-client `PPPP_CheckDevOnline` path matched the YI Home UI exactly: 4 online, 3 offline, 0 unknown.
+- Online: `צד בית`, `מחסן`, `ptz`, `pool`.
+- Offline: `Living room`, `patio`, `zforce 800`.
+- `cloud_online_reported` is retained only as a diagnostic cloud hint.
+
+Policy locked and proven:
 
 - Runtime intent is explicit and durable: `start`/`restart` persist `desired_running=true`; `stop` removes that intent.
 - Newly discovered cameras do not auto-start merely because they exist.
-- After backend/App restart, only cameras with persisted running intent are restored.
+- Only authoritative-online intended cameras are started/restored.
+- Offline intended cameras remain pending with no PPPP/media runtime; intent is preserved for automatic later recovery.
 - Temporary reprobe isolation does not alter persisted runtime intent.
 - A temporary YI cloud failure at boot does not erase intent or crash the service; initial discovery is retried and pending intent is reconciled after recovery.
+- Availability `unknown` never tears down an already healthy runtime and is never promoted to online.
 
-Implementation in progress:
+Implementation:
 
 - `yi_runtime_policy.py` stores only secret-safe `stable_id` running intent using atomic mode-0600 JSON.
-- `yi_persistent_backend.py` adds policy/reconcile behavior without changing the proven media backend.
-- `yi_addon_service.py --data-dir <path>` places capability cache, runtime policy, runtime state and managed publisher state under one persistent root; the future App will use `/data`.
-- Health exposes secret-safe persistence/reconcile diagnostics.
-- Deterministic tests cover policy round-trip, permissions, pending unavailable cameras and cloud-discovery failure preserving pending intent.
-- `run_phase6c_persistence_smoke.sh` validates live persistence across three backend launches on isolated ports.
+- `yi_online_status.py` wraps the proven secret-safe `PPPP_CheckDevOnline` worker and keeps DID/InitString only in process memory.
+- `yi_persistent_backend.py` combines availability-aware reconcile behavior with the proven backend.
+- `yi_addon_service.py --data-dir <path>` places capability cache, runtime policy, runtime state and managed publisher state under one persistent root; the App uses `/data`.
+- Health/inventory expose secret-safe availability and persistence diagnostics.
 
-Exit gate:
+Final live persistence proof (2026-08-23):
 
-- Two running camera intents survive backend restart and both streams return automatically.
-- Capability cache lives under the persistent data root.
-- Explicitly stopping one camera persists; a later restart restores only the still-enabled camera.
-- Runtime policy/capability files are secret-safe and mode 0600.
-- Cloud-discovery failure keeps desired state pending for retry.
-- Service/publisher/runtime cleanup remains correct.
+- Regression tests: 5/5 PASS.
+- Availability preflight: `online_count=4`, `offline_count=3`, `unknown_count=0`, cloud-hint disagreements=3.
+- PTZ + pool both served H264 + AAC RTSP.
+- Starting offline `zforce 800` persisted intent but created no runtime.
+- Capability cache under persistent data and reprobe intent preservation passed.
+- Full service restart automatically restored PTZ + pool while zforce remained pending/stopped.
+- Clearing zforce intent and explicitly stopping pool persisted.
+- Third service launch restored only PTZ; pool remained stopped.
+- Policy cleanup, managed publisher cleanup and graceful service shutdown passed.
+- Production ports/configuration remained untouched.
+- `PHASE6C_PERSISTENCE_SMOKE=PASS`.
 
-Phase 6C closes only after 6C.6 passes.
+Exit criteria: PASS. **Phase 6C is complete.**
 
-### Phase 6D — Home Assistant App/Add-on packaging — PLANNED
+### Phase 6D — Home Assistant App/Add-on packaging — ACTIVE
 
-Current packaging direction is based on the 2026 Home Assistant App specification:
+Current packaging direction follows the current 2026 Home Assistant App specification: a repository-level `repository.yaml`, one App folder, explicit Docker `FROM`, `/data` persistence, Supervisor discovery and protected-mode operation. Current Home Assistant documentation also requires an explicit base image because the old implicit `BUILD_FROM` fallback is gone. The initial target remains `amd64`. 
 
-- `repository.yaml` + App folder with `config.yaml`, explicit Docker `FROM`, AppArmor and docs.
-- Initial architecture target: `amd64`; advertise `aarch64` only after runtime proof.
-- Persistent state under `/data`.
-- No host network, full access, Docker API or Home Assistant config-directory mapping.
-- Internal backend API authenticated with an App-generated random token delivered to the Integration through Supervisor discovery.
-- RTSP may be exposed separately for optional external Frigate consumers.
+#### Phase 6D.1 — App/container scaffold — ACTIVE
 
-Exit gate:
+Implemented initial scaffold:
+
+- root `repository.yaml`;
+- `yi_home/config.yaml` with `amd64`, experimental stage and RTSP TCP 8554;
+- explicit `ghcr.io/home-assistant/base:3.23` Docker base;
+- Python + cryptography, FFmpeg and QEMU user-mode packages;
+- go2rtc `1.9.14` downloaded with pinned SHA-256;
+- `/run.sh` using `/data`, generating a mode-0600 internal API token and publishing `yi_home` Supervisor discovery;
+- backend API binds only inside the App network; RTSP is the only host-mapped service;
+- initial AppArmor profile; no host networking, full access, Docker API or HA config-directory mapping;
+- `tools/prepare_ha_app_context.py` stages the already-proven Python/Bionic/native runtime into the Docker context without copying `.env.local` or credentials;
+- `run_phase6d_app_context_smoke.sh` validates the staged context and can optionally run a Docker build.
+
+Next exit gates:
+
+1. App-context smoke PASS on the development machine.
+2. Real amd64 Docker build PASS.
+3. HA OS Local App install/start with backend health + Supervisor discovery.
+4. Refine AppArmor only from concrete HA OS audit evidence.
+
+#### Phase 6D.2 — Configuration, storage and secrets — PLANNED
+
+- Persistent `/data` capability/runtime state already exists.
+- Add authenticated Integration → App YI credential handoff and restrictive credential storage.
+- App-generated internal backend API token is already part of the scaffold; verify persistence/rotation behavior in HA OS.
+- Supervisor discovery passes only internal API connection metadata/token to the Integration.
+- YI credentials never appear in discovery/logs/read APIs/diagnostics.
+
+#### Phase 6D.3 — Networking and health — PLANNED
+
+- No host network/full access/Docker API.
+- Backend API internal to the App network.
+- RTSP host exposure only for optional external consumers.
+- Supervisor watchdog will be added after the packaged backend health path is proven from HA OS.
+
+#### Phase 6D.4 — Architecture support — PLANNED
+
+- Initial architecture target: `amd64` only.
+- Advertise `aarch64` only after the full native/QEMU path is independently proven there.
+
+Phase 6D exit gate:
 
 - Fresh HA OS App install discovers the account, exposes at least two streams, and survives App restart without terminal configuration.
 
