@@ -96,9 +96,11 @@ This proves the live HA OS endpoint is reachable only with the App bearer creden
 
 - reads the existing private `.env.local` used for prior live tests;
 - sends the JSON body over encrypted SSH stdin rather than command-line arguments;
-- obtains the YI Home App API token from Supervisor `/discovery` inside Terminal & SSH using `SUPERVISOR_TOKEN`;
+- obtains YI Home discovery credentials from Supervisor `/discovery` inside Terminal & SSH using `SUPERVISOR_TOKEN`;
 - never prints either Supervisor/App bearer token or the YI account password;
 - prints only the secret-safe account API status/result.
+
+The first live helper attempt reached the App but got HTTP `401`. The unauthenticated endpoint test had already proven the App API itself was functioning, so this failure was isolated to discovery-token selection rather than YI account authentication. Supervisor discovery can contain multiple records for the same App/service across repeated publication events. The helper was tightened to enumerate all unique `local_yi_home` / `yi_home` discovery token candidates and select only a candidate that authenticates successfully against `GET /api/v1/account`; token values remain hidden. It now emits only candidate count and `authenticated_discovery_token_found=true` before the handoff.
 
 This helper is a development/live-gate tool only. The final product flow remains Home Assistant Integration UI → authenticated App API.
 
