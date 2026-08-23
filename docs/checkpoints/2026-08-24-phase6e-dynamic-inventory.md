@@ -2,9 +2,28 @@
 
 ## Status
 
-Implementation is complete and awaiting HA OS validation.
+Dynamic rename reconciliation: **PASS on HA OS**.
+
+Dynamic new-camera creation: **IMPLEMENTED / NOT YET VALIDATED on HA OS**.
 
 The YI Home Integration now supports periodic account-inventory refresh, camera rename reconciliation and dynamic entity creation for cameras that appear after the Config Entry was created.
+
+## Validated HA OS rename result
+
+The existing PTZ camera was renamed in the official YI application from `ptz` to `PTZ-FRONT` while its stream remained active.
+
+After inventory reconciliation Home Assistant showed the updated integration-provided names while preserving the existing device and entity identities:
+
+```text
+Device ID remained: c56c344227c9f89b672aca678a4266d8
+
+binary_sensor.ptz_online   -> friendly name: ptz-front מקוון   -> state: on
+camera.ptz_2               -> friendly name: ptz-front         -> state: streaming
+sensor.ptz_runtime_status  -> friendly name: ptz-front מצב מנגנון -> state: running
+switch.ptz_stream          -> friendly name: ptz-front שידור   -> state: on
+```
+
+This proves that a YI display-name change does not recreate the HA camera, does not change its entity IDs and does not interrupt an active stream.
 
 ## Intended behavior
 
@@ -42,14 +61,14 @@ be040bd2  Add App inventory refresh API client
 260ff4e8  Allow full YI inventory refresh to complete
 ```
 
-## Validation gate
+## Remaining validation gate
 
-1. Deploy only the Custom Integration; the App already exposes the authenticated `/api/v1/discover` endpoint.
-2. Confirm all existing entities load normally and the active PTZ camera remains streaming.
-3. Rename one camera in the official YI application.
-4. Either wait up to five minutes for periodic inventory refresh or reload the YI Home Config Entry to force the first inventory refresh immediately.
-5. Confirm the Home Assistant Device display name changes while existing entity IDs remain unchanged.
-6. Optional addition test: add a camera to the YI account and confirm its four entities appear without a Home Assistant restart/reload after inventory refresh.
+1. Keep the existing validated cameras/runtimes untouched.
+2. Add a camera to the YI account, or temporarily remove and re-add a test camera if practical.
+3. Do not reload Home Assistant or the YI Home Integration.
+4. Wait for the periodic inventory refresh.
+5. Confirm the newly discovered camera receives four entities automatically: Online, Runtime status, Stream and Camera.
+6. Confirm its stable identity remains independent of the display name.
 
 ## Security
 
