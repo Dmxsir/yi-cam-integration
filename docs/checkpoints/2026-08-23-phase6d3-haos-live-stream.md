@@ -36,29 +36,52 @@ The bridge run also showed continuous PPPP/TNP authentication and MPEG-TS progre
 
 ## HA OS failure evidence
 
-On HA OS the PTZ runtime repeatedly recreates after apparently healthy publication. Both watchdog stalls and relay failures have been observed. `published_bytes` is generation-local and resets on recreation; current-generation `publisher_attached=true` does not explain the previous generation's exit.
+On HA OS the PTZ runtime repeatedly recreates after apparently healthy publication. `published_bytes` is generation-local and resets on recreation; current-generation `publisher_attached=true` does not explain the previous generation's exit.
 
-Historical outcomes included:
-
-```text
-exit=75  # media-stall supervisor watchdog
-exit=1   # legacy generic relay/native/mux failure path
-```
-
-After secret-safe diagnostic deployment, the observed sequence included:
+Historical outcomes included generic `exit=1`, watchdog `exit=75`, and later structured diagnostics. A useful sequence from the refined deployment was:
 
 ```text
-restart_count=1  last_exit_code=75  published_bytes(current generation)=14483456
-restart_count=3  last_exit_code=85  published_bytes(current generation)=8388608
-restart_count=4  last_exit_code=75  published_bytes(current generation)=7208960
+restart_count=1  last_exit_code=75
+restart_count=3  last_exit_code=85
+restart_count=4  last_exit_code=75
 ```
 
-This is important: the HA OS instability is **not one single generic exit path**. At least two observable failure modes are occurring:
+After exception-type refinement, one generation produced:
 
-- the relay process remains alive but stops forwarding MPEG-TS for the 12-second watchdog window (`75`);
-- another generation reaches an uncaught relay exception (`85`).
+```text
+restart_count=1  last_exit_code=88
+```
 
-The two may still share one lower-level cause, so the next diagnostics are designed to distinguish QEMU/native-worker vs FFmpeg/mux vs relay parser/cleanup behavior without exposing raw runtime material.
+`88` identified an uncaught relay `RuntimeError`. A further safe sub-stage classifier then identified the actual RuntimeError family as:
+
+```text
+restart_count=1  last_exit_code=95
+```
+
+`95` means **audio/AAC unit validation failure** inside the live relay. This narrowed one failure path to malformed/corrupt channel-1 audio records rather than AppArmor, Docker networking, FFmpeg startup, or a generic process exit.
+
+## AAC recovery fix
+
+The native worker already frames each media record atomically before writing it to the Python relay. One malformed channel-1 audio unit therefore should not tear down an otherwise healthy H.264 session.
+
+`yi_native_av_relay.py` now raises `AudioUnitValidationError` only for packet-level audio validation failures such as malformed TNP audio structure, unexpected AAC codec, invalid/decrypted ADTS framing, or invalid ADTS sample-rate index. The continuous live loop drops only that isolated audio record and continues. Session/config invariants such as a bad AES key length remain fatal.
+
+Safe logs expose only a count:
+
+```text
+audio_validation_drop_count=<n>; action=drop_and_continue
+```
+
+No raw audio bytes, credentials or exception text are exposed.
+
+Relevant commits:
+
+```text
+58cdef37  Tolerate isolated malformed AAC units in live relay
+4effefa7  Test recoverable malformed AAC unit handling
+```
+
+After this fix was deployed, the next observed restart was **not `95`**. It was `75`, which confirms that at least one separate post-start stall path remains.
 
 ## AppArmor investigation — ruled out as primary cause
 
@@ -74,121 +97,101 @@ unix, + capability, + ptrace,
 
 A complain-flag experiment also continued to recreate with `exit=1`, and the available HA OS shell/log surfaces did not expose useful YI-specific audit events.
 
-Most decisively, a repeat run with the App configured with:
+Most decisively, a repeat run with `apparmor: false` also failed within a few minutes with `restart_count=2` and `exit=1`.
+
+Therefore AppArmor is **not the root cause**. The product remains on the normal restrictive AppArmor profile; no broad policy relaxation is justified.
+
+## Structured failure-stage diagnostics
+
+The stable-id relay adapter maps only fixed, secret-safe failure classes to process exit codes. It does not expose exception messages, raw log lines, camera credentials, UID/DID, PPPP key material or connection material.
+
+Current codes:
 
 ```text
-apparmor: false
-```
-
-also failed within a few minutes:
-
-```text
-State: running
-Desired: True
-Process: True
-Restarts: 2
-Reason: recreated_after_exit
-Exit: 1
-Publisher: True
-Bytes: 12517376
-Error: None
-```
-
-Therefore AppArmor is **not the root cause** of the long-run HA OS failure. The earlier AppArmor-disabled pass was an intermittent successful run, not a causal fix. The product should remain on the normal restrictive AppArmor profile; no broad policy relaxation is justified.
-
-## Observability gap
-
-The Home Assistant Runtime status sensor exposes the supervised process exit code, while the detailed per-camera runtime log lives inside App `/data/runtime` and is not directly visible from the normal Terminal & SSH App.
-
-The relay already emits secret-safe terminal markers such as:
-
-```text
-native_worker_exit=<rc>; mpegts_mux_exit=<rc>; video_frames=<n>; audio_frames=<n>
-PHASE3G_NATIVE_AV=FAIL
-```
-
-Continuing environment A/B tests without converting these safe markers into visible structured status would be guesswork.
-
-## Secret-safe failure-stage diagnostics
-
-The stable-id relay adapter converts existing fixed-format relay outcomes into diagnostic process exit codes. It never exposes exception messages, raw log lines, camera credentials, UID/DID, PPPP key material or connection material.
-
-Existing relay-summary codes:
-
-```text
+74 = startup stall before first MPEG-TS bytes
+75 = post-start media stall; child process state unavailable
+76 = post-start stall; qemu-aarch64 alive, ffmpeg alive
+77 = post-start stall; qemu-aarch64 alive, ffmpeg missing
+78 = post-start stall; qemu-aarch64 missing, ffmpeg alive
+79 = post-start stall; qemu-aarch64 missing, ffmpeg missing
 81 = native PPPP/TNP worker exited non-zero
 82 = FFmpeg MPEG-TS mux exited non-zero
-83 = relay ended with zero video frames
-84 = relay ended with zero audio frames
-85 = generic uncaught relay exception (legacy diagnostic generation)
-86 = relay failure could not be classified safely
-```
-
-The latest refinement classifies uncaught exception **types** without surfacing exception messages:
-
-```text
+83 = zero video frames
+84 = zero audio frames
+85 = other uncaught relay exception
+86 = safely unclassified relay failure
 87 = relay EOFError
-88 = relay RuntimeError
+88 = relay RuntimeError not otherwise classified
 89 = relay subprocess TimeoutExpired
 90 = relay BrokenPipeError
 91 = relay OSError
 92 = relay ValueError
-85 = other uncaught relay exception
+93 = native stream header/framing RuntimeError
+94 = invalid native media record RuntimeError
+95 = audio unit validation RuntimeError family
+96 = AAC format changed during live session
+97 = H.264/video unit validation RuntimeError
+98 = native worker pipe setup RuntimeError
 ```
 
-The session supervisor now also performs a best-effort `/proc` descendant snapshot at a **post-start media stall**, before terminating the relay process group. Only the presence/absence of `qemu-aarch64` and `ffmpeg` is encoded; no PID or command line is surfaced:
+The startup/media distinction is now explicit: after deploying the `74` split, another PTZ run still returned `75`. That proves the failure occurred **after media had started**, not during startup.
+
+## Why `75` remained ambiguous on HA OS
+
+The first stall classifier attempted to inspect:
 
 ```text
-75 = media stall; process state unavailable (also retained for startup stall)
-76 = media stall; qemu-aarch64 alive, ffmpeg alive
-77 = media stall; qemu-aarch64 alive, ffmpeg missing
-78 = media stall; qemu-aarch64 missing, ffmpeg alive
-79 = media stall; qemu-aarch64 missing, ffmpeg missing
+/proc/<relay-pid>/task/<relay-pid>/children
 ```
 
-This should answer two high-value questions from the next failing generations:
+On HA OS this returned unavailable at the stall point, so the supervisor could not convert `75` into `76–79` even though the relay itself directly owns the QEMU and FFmpeg `Popen` handles.
 
-1. For watchdog stalls, were QEMU/native worker and FFmpeg still alive when MPEG-TS stopped moving?
-2. For relay exceptions, what safe exception class escaped the proven relay path?
+Continuing to depend on `/proc` would therefore leave the most important stall branch ambiguous.
 
-The HA Runtime sensor mapping in the repository has corresponding `last_failure_stage` labels once the updated custom integration is deployed.
+## Relay-owned child-state marker
 
-Relevant diagnostic commits in this investigation include:
+The next diagnostic no longer depends on `/proc` as the primary source.
+
+`yi_native_av_relay.py` now runs a lightweight daemon reporter that polls only its own direct process handles and atomically writes a `0600` marker containing exactly two booleans:
 
 ```text
-08ef6609  Add secret-safe relay failure exit diagnostics
-c7c49997  Expose secret-safe YI runtime failure stage
-fd57152d  Test secret-safe relay failure classification
-3c3ca5dd  Refine relay exception diagnostics
-498fbd7c  Classify media stalls by child process state
-b4cfa831  Expose refined HA runtime failure stages
-eb00d4ad  Test refined relay exception diagnostics
-1c151fe0  Test media-stall process diagnostics
+qemu_alive=0|1
+ffmpeg_alive=0|1
+```
+
+The outer session supervisor creates a unique marker path under `/tmp`, passes it via `YI_PHASE3_CHILD_STATE_MARKER`, and reads that marker when a post-start stall fires. `/proc` remains only a development fallback.
+
+The marker contains no PID, command line, camera identity, credentials, token, UID/DID, PPPP material, media bytes or exception text.
+
+Relevant commits:
+
+```text
+2c669521  Use relay-owned child state for stall diagnostics
+873b29e7  Report secret-safe relay child liveness
+4eead17a  Test relay-owned stall state markers
+4a0712e5  Test secret-safe relay child state marker
 ```
 
 ## Next gate
 
-1. Keep the normal App security configuration (`apparmor: true`) and PTZ-only test scope.
-2. Stage/rebuild the App with the latest refined diagnostic relay and supervisor.
-3. Run PTZ until the first one or two recreations; do not wait for a long-duration pass.
+1. Keep `apparmor: true` and PTZ-only scope.
+2. Deploy the latest `yi_native_session_supervisor.py` and `yi_native_av_relay.py` together.
+3. Run PTZ until the first recreation; no long wait is required.
 4. Record `last_exit_code`.
-5. Follow the resulting lower-level stage rather than changing HA OS security/network settings.
+5. Follow the resulting branch:
 
-Interpretation of the next useful exits:
-
-- `76`: both QEMU/native worker and FFmpeg were still alive while MPEG-TS stalled; investigate pipe/read/write deadlock or source starvation.
-- `77`: QEMU/native worker alive but FFmpeg disappeared; focus on mux lifetime/failure.
-- `78`: FFmpeg alive but QEMU/native worker disappeared; focus on native worker/PPPP termination and relay blocking behavior.
-- `79`: both descendants disappeared while the Python relay remained alive; focus on relay cleanup/wait behavior.
-- `87`: native worker/media pipe likely reached EOF; correlate with worker termination path.
-- `88`: relay validation/runtime invariant failure; add a safe sub-stage only if needed.
-- `89`: cleanup/wait timeout; focus on child/mux shutdown lifecycle.
-- `90`/`91`: pipe or OS I/O failure; identify which safe operation needs sub-stage instrumentation.
-- `92`: parser/value invariant failure; add a safe parser stage if needed.
-- `81`/`82`: direct native-worker or FFmpeg non-zero termination.
+```text
+76 -> QEMU/native worker and FFmpeg both alive: investigate source starvation / pipe / mux deadlock
+77 -> QEMU alive, FFmpeg missing: focus on FFmpeg mux termination
+78 -> QEMU missing, FFmpeg alive: focus on native worker / PPPP session termination
+79 -> both missing while relay survives: focus on relay child cleanup/lifecycle
+74 -> startup/session establishment issue
+95 -> isolated AAC handling still not sufficient; inspect remaining audio invariant
+other structured code -> follow that exact stage
+```
 
 Do not resume the two-camera gate until one-camera HA OS long-run stability is proven.
 
 ## Security
 
-This checkpoint contains no YI password, camera password, cloud/session token, App bearer token, UID/DID, PPPP InitString, raw connection material, raw per-camera runtime logs, exception messages or process command lines.
+This checkpoint contains no YI password, camera password, cloud/session token, App bearer token, UID/DID, PPPP InitString, raw connection material, raw per-camera runtime logs, exception messages, process command lines or PIDs.
