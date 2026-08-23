@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, override
 
 import voluptuous as vol
@@ -34,6 +35,7 @@ from .const import (
     DOMAIN,
 )
 
+_LOGGER = logging.getLogger(__name__)
 REGIONS = {"eu": "Europe", "usa": "United States", "sea": "Asia / Pacific", "chn": "China"}
 
 
@@ -90,20 +92,41 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         config = dict(discovery_info.config)
         required = (CONF_HOST, CONF_PORT, CONF_API_TOKEN)
         if any(not config.get(key) for key in required) or config.get("api_version") != "v1":
+            _LOGGER.warning("YI Home Hass.io discovery payload is incomplete or has an unsupported API version")
             return self.async_abort(reason="invalid_discovery")
 
         self._discovery = config
         self._app_name = discovery_info.name or "YI Home"
+        safe_host = str(config[CONF_HOST])
+        safe_port = int(config[CONF_PORT])
+        _LOGGER.info(
+            "Received YI Home Hass.io discovery for host=%s port=%s; credentials_exposed=false",
+            safe_host,
+            safe_port,
+        )
 
         try:
             health = await self._api().health()
             account = await self._api().account_status()
-        except (YiHomeCannotConnect, YiHomeInvalidAuth, YiHomeApiError):
+        except (YiHomeCannotConnect, YiHomeInvalidAuth, YiHomeApiError) as exc:
+            _LOGGER.warning(
+                "YI Home Hass.io discovery health check failed for host=%s port=%s error=%s",
+                safe_host,
+                safe_port,
+                type(exc).__name__,
+            )
             return self.async_abort(reason="cannot_connect")
 
         if health.get("secrets_exposed") is not False or account.get("secrets_exposed") is not False:
+            _LOGGER.error("YI Home backend failed the secret-safety contract during Hass.io discovery")
             return self.async_abort(reason="unsafe_backend")
 
+        _LOGGER.info(
+            "YI Home Hass.io discovery validated for host=%s port=%s account_configured=%s",
+            safe_host,
+            safe_port,
+            account.get("configured") is True,
+        )
         if account.get("configured") is True:
             return await self._create_entry(
                 region=account.get("region"),
