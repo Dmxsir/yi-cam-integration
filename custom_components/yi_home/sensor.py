@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import YiHomeCoordinator
@@ -57,14 +57,23 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up camera runtime status sensors."""
+    """Set up camera runtime sensors, including cameras discovered later."""
     coordinator: YiHomeCoordinator = entry.runtime_data.coordinator
-    cameras = coordinator.data.get("cameras", []) if coordinator.data else []
-    async_add_entities(
-        YiHomeRuntimeSensor(coordinator, str(camera["stable_id"]))
-        for camera in cameras
-        if isinstance(camera, dict) and isinstance(camera.get("stable_id"), str)
-    )
+    known_ids: set[str] = set()
+
+    @callback
+    def async_add_new_entities() -> None:
+        new_ids = coordinator.camera_ids() - known_ids
+        if not new_ids:
+            return
+        known_ids.update(new_ids)
+        async_add_entities(
+            YiHomeRuntimeSensor(coordinator, stable_id)
+            for stable_id in sorted(new_ids)
+        )
+
+    async_add_new_entities()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_new_entities))
 
 
 class YiHomeRuntimeSensor(YiHomeCameraEntity, SensorEntity):
