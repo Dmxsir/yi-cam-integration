@@ -13,219 +13,123 @@ Latest checkpoint: [`docs/checkpoints/2026-08-23-phase6d3-haos-live-stream.md`](
 - **Frigate = optional media consumer**
 - No Android phone, ADB, SD-card hack, manual model whitelist, UID/DID entry, per-camera YAML or manual RTSP setup in the final user experience.
 
-## Completed research/proof phases
+## Completed phases
 
-### Phase 1–2 — Cloud/APK/TNP research — COMPLETE
+- Phase 1–2 — Cloud/APK/TNP research: **COMPLETE**.
+- Phase 3 — Native Linux PPPP/TNP H264 + AAC media: **COMPLETE**.
+- Phase 4 — Frigate interoperability: **COMPLETE**.
+- Phase 5 — Multi-camera operation and scoped recovery: **COMPLETE**.
+- Phase 6A — Generic account discovery by secret-safe identity: **COMPLETE**.
+- Phase 6B — Generic runtime/capability cache: **COMPLETE**.
+- Phase 6C — Long-running backend, lifecycle, managed go2rtc, authoritative availability and persistence: **COMPLETE**.
 
-- APK-derived YI cloud authentication understood.
-- Device inventory and TNP connection material retrieval established.
-- Official-client/oracle behavior used to validate protocol details.
+## Phase 6D — Home Assistant App/Add-on packaging — ACTIVE
 
-### Phase 3 — Native Linux PPPP/TNP media — COMPLETE
+### Phase 6D.1 — Container/runtime packaging — COMPLETE
 
-- Phone-free Linux PPPP connection proven.
-- Native TNP authentication proven.
-- H264 1920x1080 video extraction proven.
-- Native AAC-LC 16 kHz mono extraction proven.
-- MPEG-TS / RTSP publication through go2rtc proven.
+- HA OS Local App scaffold and real amd64 image build proven.
+- Persistent `/data`, protected/AppArmor operation and least-privilege networking proven.
+- go2rtc 1.9.14 pinned by SHA-256.
+- Bionic/native PPPP runtime staged without development credentials/state.
+- Local App bootstrap proven as `local_yi_home` from `/addons/yi_home`.
 
-### Phase 4 — Frigate interoperability — COMPLETE
+### Phase 6D.2 — Configuration, storage and secrets — COMPLETE
 
-- Native YI RTSP consumed by Frigate.
-- Detection and recording path proven.
-- Audio path identified and validated.
+- Authenticated Integration → App account credential handoff proven.
+- `/data/yi.env` stored restrictively and atomically.
+- YI password not stored in HA Config Entry.
+- App bearer token persists mode `0600`.
+- Account configuration/discovery survives App restart.
+- Cameras are not auto-started merely because they are discovered.
 
-### Phase 5 — Multiple cameras and recovery — COMPLETE
+### Phase 6D.3 — Networking, entities and live HA OS media — ACTIVE
 
-- Two simultaneous native PPPP/TNP sessions proven.
-- Per-camera session isolation proven.
-- Media-stall watchdog implemented.
-- Fault injection proved automatic recovery without restarting go2rtc or the unaffected camera.
+Proven so far:
 
-## Phase 6 — Product backend + Home Assistant packaging — ACTIVE
+- Home Assistant Core consumes Supervisor/App discovery and reaches the internal backend.
+- 7 camera Devices are registered.
+- 3 entities per camera are live: Online, Runtime status, Stream control (21 total).
+- Stream switch controls durable App runtime intent.
 
-### Phase 6A — Generic account discovery core — COMPLETE
+#### FFmpeg 8 early-stall regression — RESOLVED
 
-- 7/7 cameras discovered automatically.
-- Stable secret-safe camera IDs established.
-- No model whitelist required for runtime selection.
-- TNP readiness and credential decryption checks are reusable backend functionality.
-
-Exit criteria: PASS.
-
-### Phase 6B — Generic camera runtime and capability probe — COMPLETE
-
-- Generic runtime resolves cameras by `stable_id`.
-- Cross-model TNP-v2 H264/AAC media profile proven.
-- Persistent secret-safe capability cache implemented and live write/read proven.
-
-Exit criteria: PASS.
-
-### Phase 6C — App backend/service — COMPLETE
-
-Completed backend functionality includes:
-
-- versioned secret-safe HTTP API;
-- generic account discovery and inventory;
-- one independent supervised runtime per `stable_id`;
-- start/stop/restart control API;
-- bounded reprobe and capability refresh;
-- one shared App-managed go2rtc publisher;
-- stable per-camera stream identity;
-- two-camera concurrent publication and scoped recovery;
-- authoritative `PPPP_CheckDevOnline` availability;
-- persistent desired-running policy and restart restoration;
-- `/data` capability/runtime/publisher state.
-
-Final Phase 6C live gates:
-
-```text
-PHASE6C_API_SMOKE=PASS
-PHASE6C_LIFECYCLE_SMOKE=PASS
-PHASE6C_REPROBE_SMOKE=PASS
-PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS
-PHASE6C_MEDIA_ISOLATION_SMOKE=PASS
-PHASE6C_PERSISTENCE_SMOKE=PASS
-```
-
-Exit criteria: PASS. **Phase 6C is complete.**
-
-### Phase 6D — Home Assistant App/Add-on packaging — ACTIVE
-
-#### Phase 6D.1 — App/container scaffold — COMPLETE
-
-Implemented and proven:
-
-- repository-level `repository.yaml` and Local App folder `yi_home/`;
-- explicit `ghcr.io/home-assistant/base:3.23` Docker base;
-- `amd64` initial target;
-- Bionic/native runtime staged without development credentials/state;
-- Python/cryptography and QEMU user-mode runtime;
-- go2rtc `1.9.14` with pinned SHA-256;
-- `/run.sh` with `/data` persistence and mode-0600 internal API token;
-- Supervisor `yi_home` discovery;
-- protected/AppArmor operation with no host networking, full access or Docker API;
-- secret-safe build-context and real Docker-image smoke gates.
-
-HA OS Local App bootstrap is proven at slug `local_yi_home` with source `/addons/yi_home`.
-
-Exit criteria: PASS. **Phase 6D.1 is complete.**
-
-#### Phase 6D.2 — Configuration, storage and secrets — COMPLETE
-
-Implemented and live-proven:
-
-- authenticated `GET/POST /api/v1/account`;
-- Integration → App credential handoff;
-- account validation before persistence;
-- restrictive atomic `/data/yi.env` persistence;
-- no YI password in the Home Assistant Config Entry;
-- no cloud session token or raw camera connection material in read APIs/diagnostics;
-- App-generated backend bearer token persisted mode `0600`;
-- restart persistence with `account_configured=true` and successful discovery;
-- newly discovered cameras remain stopped unless explicit durable runtime intent exists.
-
-Exit criteria: PASS. **Phase 6D.2 is complete.**
-
-#### Phase 6D.3 — Networking, entities and live HA OS media — ACTIVE
-
-Proven:
-
-- Home Assistant Core reaches the App backend through Supervisor/App discovery;
-- one HA Device per discovered camera;
-- 7 camera devices registered;
-- 3 entities per camera currently registered: Online, Runtime status and Stream control (21 total);
-- stream start/stop is controlled through the Integration without per-camera YAML;
-- App backend remains internal to the App network;
-- optional RTSP exposure remains separate from the Integration control path.
-
-##### FFmpeg regression and packaging fix — COMPLETE
-
-The HA OS live-stream stall was reproduced using the exact App image outside Home Assistant and isolated to Alpine 3.23 FFmpeg 8.0.1.
+The exact App image reproduced an early 20–30 second media stall with Alpine FFmpeg 8.0.1.
 
 A/B proof:
 
 ```text
-Alpine + QEMU 8.2.2 + FFmpeg 8.0.1 = FAIL after roughly 20–30 s
+Alpine + QEMU 8.2.2 + FFmpeg 8.0.1 = FAIL around 25–30 s
 Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 ```
 
-The complete backend/lifecycle/go2rtc path using the normal App QEMU 10.1.5 plus FFmpeg 6.0.1-static remained stable for 150 seconds with `restart_count=0` and more than 22 MB published. Therefore the QEMU version is not the root cause.
+The App now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256. The normal App QEMU 10.1.5 remains in use.
 
-The App now pins FFmpeg/ffprobe `6.0.1-static` with a fixed archive SHA-256 instead of installing Alpine's unpinned `ffmpeg` package. The App-context smoke enforces the pinned runtime.
+A full backend/lifecycle/go2rtc test with the pinned runtime passed 150 seconds with `restart_count=0` and more than 22 MB published.
 
-##### One-camera HA OS live-stream E2E — COMPLETE
+#### One-camera HA OS long-run gate — ACTIVE / FAILING
 
-After rebuilding and deploying `local_yi_home`, the `ptz` camera remained live with:
+The rebuilt HA OS App initially streamed PTZ successfully beyond 31 MB with no restart. Continued runtime later showed:
 
 ```text
 desired_running=true
 process_alive=true
-restart_count=0
-last_reason=started
-last_exit_code=null
+restart_count=3
+last_reason=recreated_after_exit
+last_exit_code=75
 publisher_attached=true
-published_bytes=31719424
+published_bytes=2228224
 publisher_error=null
 ```
 
-Exit criteria for one-camera live media: PASS.
+Exit `75` means the media-stall supervisor observed no new relay stdout bytes for the configured stall window and recreated the runtime.
 
-##### Next Phase 6D.3 gate — multi-camera HA OS E2E
+Corrected conclusion:
 
-1. Keep the proven `ptz` stream running.
-2. Enable a second authoritative-online camera, initially `pool`.
-3. Require both runtimes to remain stable concurrently for at least 3–5 minutes with no restart/publisher error and monotonically increasing published bytes.
-4. Stop/restart one stream and require the other runtime plus shared go2rtc publisher to remain unaffected.
-5. Restart the App and require only persisted desired-running + authoritative-online cameras to restore.
-6. After the App-native multi-camera gate passes, validate optional Frigate consumption from the stable App-owned RTSP endpoints.
+- FFmpeg 6.0.1 fixes the early FFmpeg 8 regression.
+- A separate longer-duration media stall remains unresolved.
+- The previous 150-second test was not long enough to close the one-camera E2E gate.
+- **Do not start the multi-camera HA OS gate yet.**
 
-Do not mark Phase 6D complete until the multi-camera HA OS and restart gates pass.
+Next gate:
 
-#### Phase 6D.4 — Architecture support — PLANNED
+1. Run the exact pinned `yi-home:phase6d` image on the development laptop for at least 10 minutes using the full persistent backend/lifecycle/shared-go2rtc path and no RTSP consumer.
+2. If it also reaches `exit=75`, isolate the remaining fault below HA/Supervisor in the relay/media/session path.
+3. If it stays stable for 10 minutes, compare HA OS-specific container/network/scheduling constraints.
+4. Only after one-camera long-run stability passes should two-camera HA OS testing resume.
 
-- Initial architecture target remains `amd64` only.
-- Advertise `aarch64` only after the full native/QEMU path is independently proven there.
+### Phase 6D.4 — Architecture support — PLANNED
 
-Phase 6D exit gate:
+- Initial target remains `amd64` only.
+- Advertise `aarch64` only after independent full native/QEMU proof.
 
-- fresh HA OS App install/start without development-machine files;
-- Integration-driven account configuration;
-- automatic inventory/device/entity creation;
-- at least two simultaneous App-owned live streams;
+Phase 6D exit gate remains:
+
+- fresh HA OS App install/start;
+- Integration-driven account setup;
+- automatic camera/device/entity discovery;
+- long-running stable App-owned media;
+- at least two simultaneous independent streams;
 - persisted desired-running behavior survives App restart;
-- no terminal, manual UID/DID/RTSP/YAML or Android dependency in the product flow.
+- no terminal/manual UID/DID/model/RTSP/YAML/Android dependency in normal use.
 
-### Phase 6E — Home Assistant Custom Integration — ACTIVE
+## Phase 6E — Home Assistant Custom Integration — ACTIVE
 
-Foundation already implemented/proven while Phase 6D live packaging work proceeds:
+Foundation already live:
 
-- `async_step_hassio` consumes Supervisor/App discovery;
-- backend health/API validation;
-- account setup form and authenticated handoff;
-- Config Entry created without YI password;
-- coordinator-driven camera inventory/status refresh;
-- one Device Registry entry per camera using immutable identity;
-- Online binary sensor;
-- Runtime status sensor with secret-safe lifecycle attributes;
-- Stream switch controlling durable App runtime intent;
-- 7 devices / 21 entities live-registered in HA OS.
+- Hass.io/Supervisor discovery Config Flow;
+- account form and authenticated handoff;
+- Config Entry without YI password;
+- coordinator-driven camera inventory/status;
+- 7 Devices / 21 Online, Runtime and Stream entities.
 
-Remaining Integration work:
+Remaining:
 
 - camera/live-view entity backed by the App-owned media path;
-- polished translations/entity names and user-facing diagnostics;
-- dynamic camera additions without manual reload where practical;
-- reauthentication/error UX;
-- final secret-redaction/diagnostic tests.
+- polished translations/diagnostics and reauthentication UX;
+- dynamic camera additions where practical;
+- final secret-redaction tests.
 
-Phase 6E exit gate:
-
-- Add YI Home Integration automatically creates camera devices/entities and live view without YAML or protocol internals.
-
-### Phase 6F — Zero-manual-config onboarding — PLANNED
-
-Target flow:
+## Phase 6F — Zero-manual-config onboarding — PLANNED
 
 ```text
 Install YI Home App
@@ -237,25 +141,17 @@ Install YI Home App
 
 No UID/DID/model/TNP/RTSP/YAML required from the user.
 
-### Phase 6G — Frigate integration/export — PLANNED
+## Phase 6G — Frigate integration/export — PLANNED
 
 - Stable App-owned RTSP endpoints.
-- Frigate remains optional and separate from core Home Assistant camera support.
-- Frigate failure must not affect App/Integration lifecycle.
+- Frigate remains optional and separate from the core App/Integration lifecycle.
+- Validate Frigate only after the App-native long-run and multi-camera gates pass.
 
 ## Later work
 
-- Real timestamp/timebase cleanup for native media.
-- Additional TNP profiles and model coverage.
-- Camera controls/PTZ where supported.
+- Real timestamp/timebase cleanup.
+- Additional TNP profiles/model coverage.
+- PTZ/camera controls where generic/safe.
 - Motion/event integration.
-- Performance work to reduce or eliminate QEMU where feasible.
+- Reduce/eliminate QEMU where practical.
 - Packaging/release automation and HACS/App repository distribution.
-
-## Non-goals for the final product
-
-- Running production relays manually on a laptop.
-- Editing go2rtc or Frigate YAML per YI camera.
-- Selecting cameras by display name.
-- Maintaining a hardcoded supported-model list.
-- Requiring Android/ADB or YI Hack SD cards.
