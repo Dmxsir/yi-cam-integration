@@ -3,8 +3,11 @@
 ## Status
 
 - Phase 6C.5: COMPLETE.
-- Phase 6C.6: ACTIVE.
-- This checkpoint records the authoritative YI online/offline source and the availability-aware persistence implementation before the final live persistence exit-gate run.
+- Phase 6C.6: COMPLETE.
+- Phase 6C: COMPLETE.
+- Phase 6D: ACTIVE.
+
+This checkpoint records the authoritative YI online/offline source, the availability-aware persistence implementation, and the final live Phase 6C.6 exit-gate proof.
 
 ## Live availability proof
 
@@ -51,7 +54,7 @@ Conclusion:
 - `cloud_online_reported` / `/v4/devices/list.online` is retained only as a diagnostic cloud hint and must not drive runtime restore or UI availability.
 - Availability, transport material readiness and actual media-runtime state are separate concepts.
 
-## Implementation after proof
+## Implemented availability/runtime policy
 
 ### `yi_online_status.py`
 
@@ -64,19 +67,17 @@ Reusable secret-safe online-status layer:
 - caches transient material after discovery so periodic refresh does not require repeated cloud login;
 - refresh is shutdown-aware and stops between camera probes.
 
-The existing development smoke prepares the worker/library under:
+The development smoke prepares the worker/library under:
 
 ```text
 <runtime-root>/data/local/tmp/yi-online-status/
 ```
 
-The future Home Assistant App image must package this worker and an export-capable YI `libPPPP_API.so` directly; no compiler is required at runtime.
+The Home Assistant App packaging path now stages this proven worker and an export-capable YI `libPPPP_API.so` into the generated App build context; no compiler is required at App runtime.
 
 ### `yi_persistent_backend.py`
 
-Availability is integrated only into the Phase 6C.6 persistent adapter so the proven 6C.1–6C.5 media backend remains unchanged.
-
-API camera/status records now add:
+API camera/status records add:
 
 ```text
 availability_state
@@ -99,80 +100,81 @@ Runtime policy semantics:
 
 Availability refresh defaults to 30 seconds in the persistent backend and uses cached transient TNP material. Shutdown cancels refresh before lifecycle/publisher teardown so a late reconcile cannot recreate a runtime during service shutdown.
 
-### Regression coverage
+## Final live Phase 6C.6 exit gate
 
-`tests/test_yi_runtime_policy.py` now covers:
+Live run on 2026-08-23 passed end-to-end using isolated backend/go2rtc ports and a temporary persistent data directory.
 
-- policy round trip and mode 0600;
-- undiscovered desired camera remains pending;
-- availability-aware restore starts online desired cameras only;
-- offline desired camera remains pending;
-- an already-running camera becoming offline is stopped while persisted intent remains true;
-- cloud discovery failure preserves pending intent.
-
-### Live Phase 6C.6 smoke
-
-`tools/phase3_pppp_probe/run_phase6c_persistence_smoke.sh` now:
-
-1. runs the secret-safe online-status preflight and prepares the exact worker/library;
-2. requires backend availability to resolve every TNP camera with zero unknowns;
-3. selects PTZ + pool only from `availability_state=online`;
-4. selects an offline camera (prefers `zforce 800`);
-5. starts PTZ + pool and validates dual H264 + AAC RTSP;
-6. sends start to the offline camera and requires HTTP 202 with no runtime process;
-7. persists all three intents;
-8. restarts the backend with the same data directory;
-9. requires PTZ + pool to restore automatically while the offline camera remains pending/stopped;
-10. clears the offline pending intent, explicitly stops pool, restarts again and requires only PTZ to restore;
-11. verifies mode-0600 secret-safe policy/capability files and complete cleanup.
-
-Production go2rtc ports `1984/8554` remain untouched; the persistence smoke uses isolated ports `18104/11986/18556`.
-
-## Current branch changes after the availability proof
-
-Base proof commit: `cf8669b841921881f66d13cfc8f641eb56699b93`.
-
-Files changed after that proof:
-
-- `yi_online_status.py`
-- `yi_persistent_backend.py`
-- `tests/test_yi_runtime_policy.py`
-- `tools/phase3_pppp_probe/run_phase6c_persistence_smoke.sh`
-
-## Next live command
-
-```bash
-cd ~/Documents/yi-cam-integration-phase3 && git pull --ff-only && PYTHON=~/Documents/yi-cam-integration/.venv/bin/python bash tools/phase3_pppp_probe/run_phase6c_persistence_smoke.sh
-```
-
-Expected key markers include:
+Observed markers:
 
 ```text
 python_compile=PASS
 runtime_policy_unit_tests=PASS
+production_modified=false
+production_go2rtc_ports_untouched=1984,8554
+persistent_data_dir_isolated=PASS
+online_count=4
+offline_count=3
+unknown_count=0
+cloud_hint_disagreement_count=3
 availability_preflight=PASS
+service_launch_1=PASS
 backend_availability_inventory=PASS
+persistent_start_http=PASS
 offline_start_deferred_without_runtime=PASS
 first_launch_dual_rtsp=PASS
+capability_cache_under_data=PASS
 reprobe_preserved_runtime_intent=PASS
 offline_pending_intent_persisted=PASS
+service_shutdown_1=PASS
+service_launch_2=PASS
 dual_runtime_restore_after_restart=PASS
 offline_runtime_remained_pending_after_restart=PASS
 dual_rtsp_after_backend_restart=PASS
 offline_pending_intent_clear=PASS
 explicit_stop_persisted=PASS
+service_shutdown_2=PASS
+service_launch_3=PASS
 selective_runtime_restore=PASS
+stopped_camera_remained_stopped=PASS
 runtime_policy_final_cleanup=PASS
+service_shutdown_3=PASS
 persistent_service_shutdown_cleanup=PASS
 PHASE6C_PERSISTENCE_SMOKE=PASS
 ```
 
+Concrete cameras used by the smoke:
+
+- primary online camera: PTZ `e2f22804fecdbd8c3561`;
+- peer online camera: pool `867ecdee5a3692c669f9`;
+- offline/pending camera: zforce 800 `8e97091cc281fe207f8c`.
+
+What the run proves:
+
+1. The authoritative 4-online/3-offline inventory is available inside the backend.
+2. PTZ + pool can be explicitly started and both serve H264 + AAC RTSP.
+3. Starting the offline zforce camera persists desired intent but creates no runtime process.
+4. Capability cache is stored under the persistent data root and reprobe does not alter desired-running intent.
+5. A full backend/App-style shutdown and restart restores both online desired cameras automatically.
+6. The offline desired camera remains pending/stopped after restart.
+7. Clearing the offline intent and explicitly stopping pool persist correctly.
+8. A third launch restores only PTZ while pool remains stopped.
+9. Runtime policy cleanup, service shutdown and managed publisher cleanup all pass.
+10. Production go2rtc configuration/ports remain untouched.
+
 ## Exit decision
 
-Do not mark Phase 6C.6 or Phase 6C COMPLETE until the updated live persistence smoke returns `PHASE6C_PERSISTENCE_SMOKE=PASS`.
+`PHASE6C_PERSISTENCE_SMOKE=PASS` closes Phase 6C.6 and therefore closes Phase 6C completely.
 
-After PASS:
+## Phase 6D handoff
 
-1. update `ROADMAP.md` and `docs/development-plan.md` with the authoritative availability proof and 6C.6 live evidence;
-2. mark Phase 6C COMPLETE;
-3. proceed to Phase 6D Home Assistant App packaging, including the prebuilt online-status worker and export-capable PPPP library in the App image.
+Phase 6D Home Assistant App packaging is now active. Initial scaffold added after this proof:
+
+- root `repository.yaml`;
+- `yi_home/config.yaml` with amd64-only experimental App metadata and RTSP port 8554;
+- explicit Home Assistant base Dockerfile with Python, FFmpeg, QEMU user-mode and pinned go2rtc 1.9.14 download/checksum;
+- `/run.sh` generating a mode-0600 internal backend token and publishing Supervisor discovery service `yi_home`;
+- protected-mode AppArmor profile with no host network/full-access/Docker API requirement;
+- `tools/prepare_ha_app_context.py` to stage the proven project/native runtime into the App Docker context without copying `.env.local` or credentials;
+- `tools/phase3_pppp_probe/run_phase6d_app_context_smoke.sh` for static/staging validation and optional Docker build.
+
+Next gate: run the Phase 6D App-context smoke, then perform the first actual amd64 container build and HA OS Local App start.
