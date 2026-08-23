@@ -61,7 +61,7 @@ fi
 if ! grep -q '^ARG FFMPEG_SHA256=28268bf402f1083833ea269331587f60a242848880073be8016501d864bd07a5$' "$APP_DIR/Dockerfile"; then
   fail "pinned FFmpeg archive checksum changed unexpectedly"
 fi
-if ! grep -q 'FFMPEG_SHA256.*sha256sum -c -' "$APP_DIR/Dockerfile"; then
+if ! grep -Fq 'echo "${FFMPEG_SHA256}  /tmp/ffmpeg-static.tar.xz" | sha256sum -c -' "$APP_DIR/Dockerfile"; then
   fail "pinned FFmpeg archive is not checksum-verified"
 fi
 if grep -Eq '^[[:space:]]+ffmpeg[[:space:]]*\\$' "$APP_DIR/Dockerfile"; then
