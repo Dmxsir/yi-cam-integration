@@ -55,6 +55,24 @@ if ! grep -q '^discovery:' "$APP_DIR/config.yaml" || ! grep -q '  - yi_home' "$A
 fi
 echo "app_security_config=PASS"
 
+if ! grep -q '^ARG FFMPEG_VERSION=6\.0\.1$' "$APP_DIR/Dockerfile"; then
+  fail "proven FFmpeg 6.0.1 runtime is not pinned"
+fi
+if ! grep -q '^ARG FFMPEG_SHA256=28268bf402f1083833ea269331587f60a242848880073be8016501d864bd07a5$' "$APP_DIR/Dockerfile"; then
+  fail "pinned FFmpeg archive checksum changed unexpectedly"
+fi
+if ! grep -q 'FFMPEG_SHA256.*sha256sum -c -' "$APP_DIR/Dockerfile"; then
+  fail "pinned FFmpeg archive is not checksum-verified"
+fi
+if grep -Eq '^[[:space:]]+ffmpeg[[:space:]]*\\$' "$APP_DIR/Dockerfile"; then
+  fail "App Dockerfile still installs the unpinned Alpine ffmpeg package"
+fi
+if ! grep -q '/usr/local/bin/ffmpeg' "$APP_DIR/Dockerfile" \
+    || ! grep -q '/usr/local/bin/ffprobe' "$APP_DIR/Dockerfile"; then
+  fail "pinned FFmpeg binaries are not installed into the runtime PATH"
+fi
+echo "pinned_ffmpeg_runtime=PASS"
+
 if ! grep -q 'bashio::discovery "yi_home"' "$APP_DIR/run.sh"; then
   fail "run.sh does not publish Supervisor discovery"
 fi
@@ -89,6 +107,9 @@ echo "staged_python_compile=PASS"
 if [[ "${YI_PHASE6D_DOCKER_BUILD:-0}" == "1" ]]; then
   command -v docker >/dev/null || fail "docker is required when YI_PHASE6D_DOCKER_BUILD=1"
   docker build --pull -t yi-home:phase6d "$APP_DIR"
+  docker run --rm --entrypoint /bin/sh yi-home:phase6d -c \
+    'ffmpeg -version 2>&1 | grep -m1 -F "ffmpeg version 6.0.1-static" >/dev/null && ffprobe -version 2>&1 | grep -m1 -F "ffprobe version 6.0.1-static" >/dev/null'
+  echo "docker_ffmpeg_pin=PASS"
   echo "docker_build=PASS"
 else
   echo "docker_build=SKIPPED"
