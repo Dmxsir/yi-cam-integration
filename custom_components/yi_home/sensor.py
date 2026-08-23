@@ -37,6 +37,12 @@ _FAILURE_STAGE_BY_EXIT_CODE = {
     96: "relay_audio_format_changed",
     97: "relay_video_unit_validation",
     98: "relay_worker_pipe_setup",
+    100: "media_stall_native_header_wait",
+    101: "media_stall_native_payload_wait",
+    102: "media_stall_audio_pipe_write",
+    103: "media_stall_video_pipe_write",
+    104: "media_stall_mux_starting",
+    105: "media_stall_relay_processing",
 }
 
 
