@@ -5,6 +5,7 @@ APP_ROOT="/opt/yi-home/app"
 RUNTIME_ROOT="/opt/yi-home/runtime/bionic-root"
 API_PORT=8099
 RTSP_PORT=8554
+APP_DNS_HOST="local-yi-home"
 TOKEN_FILE="/data/backend-api-token"
 ENV_FILE="/data/yi.env"
 BACKEND_PID=""
@@ -36,7 +37,7 @@ fi
 bashio::log.info "Backend API token ${TOKEN_STATE}; mode=${TOKEN_MODE}; value_exposed=false."
 API_TOKEN="$(cat "${TOKEN_FILE}")"
 
-# Phase 6D.2 will populate this file through the authenticated internal API.
+# Phase 6D.2 populates this file through the authenticated internal API.
 # Keeping an empty restrictive file lets the App/API boot before account setup.
 if [[ ! -e "${ENV_FILE}" ]]; then
   umask 077
@@ -94,14 +95,18 @@ fi
 
 # Supervisor discovery carries only the App-internal API credential and
 # connection metadata. YI account/camera credentials are never included.
+# Use the stable Supervisor DNS hostname for a local App rather than the
+# container's transient Docker hostname, which Home Assistant Core cannot
+# reliably resolve.
 ha_config="$(
   bashio::var.json \
-    host "$(hostname)" \
+    host "${APP_DNS_HOST}" \
     port "^${API_PORT}" \
     api_version "v1" \
     token "${API_TOKEN}" \
     rtsp_port "^${RTSP_PORT}"
 )"
+bashio::log.info "Publishing YI Home discovery endpoint host=${APP_DNS_HOST} port=${API_PORT}; credentials_exposed=false."
 if bashio::discovery "yi_home" "${ha_config}" >/dev/null; then
   bashio::log.info "Published YI Home discovery information to Home Assistant."
 else
