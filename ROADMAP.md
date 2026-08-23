@@ -64,7 +64,7 @@ Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 
 The App now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256. The normal App QEMU 10.1.5 remains in use.
 
-#### One-camera HA OS long-run gate — ACTIVE / MIXED LOWER-LEVEL FAILURE MODES
+#### One-camera HA OS long-run gate — ACTIVE / TWO LOWER-LEVEL FAILURE PATHS IDENTIFIED
 
 HA OS continues to show runtime recreation after apparently healthy publication. The same exact pinned image passed two independent 10-minute development-host tests:
 
@@ -77,53 +77,53 @@ Ordinary Docker bridge/NAT is therefore ruled out.
 
 A first HA OS test with AppArmor disabled happened to pass for roughly ten minutes, but repeat testing with `apparmor: false` failed within a few minutes with `restart_count=2` and `exit=1`. Broad AppArmor A/Bs for `network,`, `signal,`, and combined `unix, + capability, + ptrace,` also failed. AppArmor is therefore **ruled out as the primary cause**; the earlier successful disabled-profile run was intermittent rather than causal.
 
-After the first secret-safe diagnostic deployment, PTZ showed both watchdog and relay-exception generations:
+Structured diagnostics then separated two real HA OS failure paths:
 
 ```text
-restart_count=1  last_exit_code=75
-restart_count=3  last_exit_code=85
-restart_count=4  last_exit_code=75
+95 = audio/AAC unit validation failure
+75 = post-start MPEG-TS stall with process state unavailable
 ```
+
+The `95` path has a targeted recovery fix: isolated malformed/corrupt channel-1 audio records are now dropped without tearing down the H.264/PPPP session. Session/config invariants remain fatal. After that fix was deployed, the next observed restart was `75`, not `95`.
+
+Startup stalls now have a distinct code:
+
+```text
+74 = no first MPEG-TS bytes before startup timeout
+```
+
+Therefore the latest `75` is proven to be a **post-start** stall, not a startup/session-establishment timeout.
+
+The first stall classifier relied on `/proc/<pid>/task/<pid>/children`; HA OS returned that process snapshot as unavailable. The latest diagnostic removes this dependency as the primary source: the relay now reports only two `0600` booleans from the direct QEMU and FFmpeg `Popen` handles, and the supervisor consumes that marker when the 12-second stall watchdog fires.
+
+Current stall codes:
+
+```text
+74 = startup stall
+75 = post-start media stall; child state unavailable
+76 = post-start stall; qemu-aarch64 alive + ffmpeg alive
+77 = post-start stall; qemu-aarch64 alive + ffmpeg missing
+78 = post-start stall; qemu-aarch64 missing + ffmpeg alive
+79 = post-start stall; qemu-aarch64 missing + ffmpeg missing
+```
+
+Other structured relay codes remain available for native-worker, mux, parser, pipe, timeout, and media-validation failures (`81–98`).
 
 Current conclusion:
 
 - FFmpeg 6.0.1 fixes the original FFmpeg 8 regression.
 - The pinned image/runtime stack is stable for at least ten minutes under both host networking and ordinary Docker bridge/NAT outside HA OS.
-- The HA OS failure is not explained by AppArmor and is not one single generic relay exit path.
-- At least one generation stalls while the relay process remains alive for the 12-second watchdog window (`75`), while another reached an uncaught relay exception (`85`).
-- Further HA OS security/network rule guessing is not useful.
-- The next gate is **secret-safe lower-level failure observability inside the existing relay/supervisor path**.
-
-Refined diagnostic exit codes for the next HA OS run:
-
-```text
-75 = media stall; descendant process state unavailable/startup stall
-76 = media stall; qemu-aarch64 alive + ffmpeg alive
-77 = media stall; qemu-aarch64 alive + ffmpeg missing
-78 = media stall; qemu-aarch64 missing + ffmpeg alive
-79 = media stall; qemu-aarch64 missing + ffmpeg missing
-81 = native PPPP/TNP worker exited non-zero
-82 = FFmpeg MPEG-TS mux exited non-zero
-83 = zero video frames
-84 = zero audio frames
-85 = other uncaught relay exception
-86 = safely unclassified relay failure
-87 = relay EOFError
-88 = relay RuntimeError
-89 = relay subprocess TimeoutExpired
-90 = relay BrokenPipeError
-91 = relay OSError
-92 = relay ValueError
-```
-
-The stall codes inspect only descendant process names through `/proc` immediately before watchdog termination; they do not surface PIDs, command lines or camera/runtime secrets. Exception classification uses only the exception class, never the exception message.
+- AppArmor is not the primary cause.
+- One crash family was isolated to malformed AAC units and now has a packet-drop recovery path.
+- A separate post-start stall remains and is the active blocker.
+- The next gate is to obtain `76/77/78/79` from the relay-owned child-state marker and follow that exact component state instead of broad environment A/B testing.
 
 Next gate:
 
 1. Keep the normal restrictive AppArmor profile and PTZ-only scope.
-2. Deploy the refined diagnostic App runtime.
-3. Run until the first one or two recreations rather than waiting for a long-duration pass.
-4. Follow the specific lower-level stage reported by `last_exit_code`.
+2. Deploy the latest relay + supervisor child-state marker diagnostics together.
+3. Run until the first recreation; no long-duration wait is required.
+4. Follow `76/77/78/79` (or any other structured code) directly.
 5. Only after one-camera long-run stability is proven should two-camera HA OS testing resume.
 
 ### Phase 6D.4 — Architecture support — PLANNED
