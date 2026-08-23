@@ -9,7 +9,8 @@
 - Phase 6D.3 short-run one-camera HA OS media: **PASS**.
 - **Phase 6D.3 long-run one-camera HA OS media: FAIL / ACTIVE INVESTIGATION.**
 - Exact pinned image 10-minute host-network long-run: **PASS**.
-- Multi-camera HA OS gate: **BLOCKED** until the HA OS-specific long-run stall is isolated.
+- Exact pinned image 10-minute Docker bridge/NAT long-run: **PASS**.
+- Multi-camera HA OS gate: **BLOCKED** until the HA OS-specific long-run failure is isolated.
 
 ## Architecture at this checkpoint
 
@@ -114,18 +115,9 @@ Exit code `75` is emitted by `yi_native_session_supervisor.py` when no relay std
 
 The old `ValueError: read of closed file` traceback visible in App logs belongs to a previous deployment before the publisher shutdown-race fix and is not evidence for the current failure.
 
-## Exact pinned image 10-minute long-run — PASS
+## Exact pinned image 10-minute host-network long-run — PASS
 
-The exact current `yi-home:phase6d` image was tested on the development laptop using:
-
-- FFmpeg 6.0.1-static;
-- QEMU 10.1.5;
-- full persistent backend;
-- production lifecycle manager and 12-second stall watchdog;
-- shared managed go2rtc;
-- PTZ only;
-- no RTSP consumer;
-- Docker `--network host`.
+The exact current `yi-home:phase6d` image was tested on the development laptop using FFmpeg 6.0.1-static, QEMU 10.1.5, full persistent backend, production lifecycle manager/12-second watchdog, shared managed go2rtc, PTZ only, no RTSP consumer and Docker `--network host`.
 
 Result over 600 seconds:
 
@@ -144,26 +136,61 @@ publisher_ready=true
 
 `published_bytes` increased monotonically from 1,572,864 at 15 seconds to 93,192,192 at 600 seconds. No runtime recreation occurred.
 
-This is strong evidence that the pinned application image, FFmpeg 6 runtime, QEMU 10.1.5, lifecycle manager, native relay and go2rtc can remain stable for at least ten minutes outside HA OS.
+## Exact pinned image 10-minute Docker bridge/NAT long-run — PASS
+
+The same exact image was then tested again with normal Docker bridge networking, explicitly removing `--network host` while keeping the rest of the runtime path equivalent.
+
+Verified network mode:
+
+```text
+bridge
+backend_ready=PASS
+```
+
+Result over 600 seconds:
+
+```text
+generation=1 for every sample
+restart_count=0 for every sample
+last_exit_code=null
+last_reason=started
+process_alive=true
+publisher_attached=true
+publisher_error=null
+published_bytes=81264640
+producer_registered=true
+producer_media_ready=true
+publisher_ready=true
+```
+
+`published_bytes` increased monotonically from 1,245,184 at 15 seconds to 81,264,640 at 600 seconds. Runtime logging showed PPPP connect/auth success, `media_started=true`, and uninterrupted MPEG-TS progress through more than 80 MB with no stall or relay failure.
+
+This rules out ordinary Docker bridge/NAT as the cause of the HA OS failure.
 
 ## Current conclusion
 
 - FFmpeg 8.0.1 definitely caused the early 20–30 second stall and remains excluded.
 - FFmpeg 6.0.1 fixes that regression.
-- The exact pinned image is stable for at least 600 seconds on the development laptop with host networking.
-- HA OS still shows longer-run runtime recreation.
-- The remaining fault is therefore narrowed to an environmental difference between the successful laptop run and the HA OS App execution.
-- The most important unisolated difference is networking: the successful laptop test used Docker host networking, while the HA OS App deliberately runs with `host_network=false` behind the Home Assistant App bridge/NAT.
-- Resource scheduling/cgroup/AppArmor or HA OS-specific runtime constraints remain possible only if bridge networking is ruled out.
+- The exact pinned image is stable for at least 600 seconds with both host networking and normal Docker bridge/NAT on the development machine.
+- Native PPPP/TNP, QEMU 10.1.5, FFmpeg 6.0.1, lifecycle, persistence, availability polling and shared go2rtc are all proven stable in that environment.
+- Ordinary Docker bridge/NAT is now ruled out.
+- The remaining failure is HA OS/App-environment specific.
+- Leading remaining categories are AppArmor/protected-mode restrictions, HA OS/Supervisor-specific network/firewall behavior beyond ordinary Docker bridge, cgroup/resource scheduling/host load, or another HA OS-specific runtime constraint.
 
-## Next isolation gate — Docker bridge networking A/B
+## Next isolation gate — read-only HA OS host evidence
 
-Before changing the Home Assistant App privilege model, run the exact same pinned image on the development laptop for at least 10 minutes **without `--network host`**, using normal Docker bridge/NAT. Keep backend/go2rtc internal to the container and inspect status through `docker exec`.
+Before weakening the App security model, collect HA OS host and Supervisor logs around a one-camera failure and search for:
 
-Interpretation:
+```text
+apparmor / DENIED / audit
+OOM / out of memory / killed process
+cgroup / throttling / resource pressure
+local_yi_home / qemu / ffmpeg
+```
 
-- If the bridge-mode container recreates with `exit=75` or `exit=1`, networking/NAT becomes the leading root cause and the next proof should compare PPPP behavior with host networking versus bridge networking directly.
-- If bridge mode also remains `restart_count=0` for 10 minutes, Docker bridge/NAT is ruled out on the development host and the investigation moves to HA OS-specific App constraints (Supervisor networking implementation, resource/cgroup scheduling, AppArmor or host kernel/runtime differences).
+If the host logs show an AppArmor denial or OOM/resource event correlated with a runtime recreation, follow that evidence directly.
+
+If the logs are clean, perform a temporary one-variable HA OS A/B with AppArmor disabled for the local development App only, preserving bridge networking and all media/runtime settings. If that test remains stable for at least ten minutes, AppArmor becomes the root cause; if it still fails, restore AppArmor immediately and move to HA OS-specific scheduling/cgroup/network-firewall diagnostics.
 
 Do not enable a second HA camera until the one-camera HA OS-specific difference is isolated.
 
