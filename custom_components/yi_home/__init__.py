@@ -14,7 +14,7 @@ from .api import YiHomeApi, YiHomeApiError
 from .const import CONF_API_TOKEN
 from .coordinator import YiHomeCoordinator
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.CAMERA, Platform.SENSOR, Platform.SWITCH]
 
 
 @dataclass
