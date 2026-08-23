@@ -13,8 +13,8 @@ apparmor: true
 discovery:
   - yi_home
 ports:
-  8554/tcp: 8554
+  8554/tcp: null
 ports_description:
-  8554/tcp: "YI Home RTSP"
+  8554/tcp: "YI Home RTSP (optional host mapping)"
 options: {}
 schema: false
