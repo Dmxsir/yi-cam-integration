@@ -36,7 +36,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-REGIONS = {"eu": "Europe", "usa": "United States", "sea": "Asia / Pacific", "chn": "China"}
+REGIONS = {"eu": "Europe", "us": "United States", "sea": "Asia / Pacific", "cn": "China"}
 
 
 class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -90,10 +90,8 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         await self._async_handle_discovery_without_unique_id()
 
         config = dict(discovery_info.config)
-
-        # Compatibility with the first Phase 6D.2 App build, which published
-        # the internal bearer credential as `token`. New App builds publish the
-        # canonical `api_token` key. Never log either value.
+        # Older development builds published the App API credential as `token`.
+        # Normalize it in-memory without ever logging or persisting both copies.
         if not config.get(CONF_API_TOKEN) and config.get("token"):
             config[CONF_API_TOKEN] = config.pop("token")
 
