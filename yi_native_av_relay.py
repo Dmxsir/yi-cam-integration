@@ -42,6 +42,7 @@ AAC_SAMPLES_PER_FRAME = 1024
 AUDIO_TICKS = MPEGTS_TIME_BASE * AAC_SAMPLES_PER_FRAME // AAC_SAMPLE_RATE
 MAX_RECORD = 2 * 1024 * 1024 + 32
 STREAM_MAGIC = b"YAV1"
+CHILD_STATE_MARKER_ENV = "YI_PHASE3_CHILD_STATE_MARKER"
 
 _STDOUT_CONSUMER_CLOSED = threading.Event()
 _PUMPS: list[threading.Thread] = []
@@ -56,6 +57,28 @@ def log(message: str) -> None:
         print(f"[phase3g-relay] {message}", file=sys.stderr, flush=True)
     except (BrokenPipeError, OSError, ValueError):
         pass
+
+
+def _write_child_state_marker(qemu_alive: bool, ffmpeg_alive: bool) -> None:
+    """Publish only safe child-liveness booleans for the outer supervisor."""
+    raw = os.getenv(CHILD_STATE_MARKER_ENV, "").strip()
+    if not raw:
+        return
+    path = Path(raw)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(
+            f"qemu_alive={1 if qemu_alive else 0}\n"
+            f"ffmpeg_alive={1 if ffmpeg_alive else 0}\n",
+            encoding="ascii",
+        )
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    except (OSError, UnicodeError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _write_worker_stderr(line: bytes) -> None:
@@ -377,6 +400,8 @@ def main() -> int:
     output_file: BinaryIO | None = None
     stop_lock = threading.Lock()
     stop_sent = False
+    child_state_stop = threading.Event()
+    child_state_thread: threading.Thread | None = None
 
     try:
         material, preflight = phase3e._fresh_exact_target(timeout=10.0)
@@ -398,6 +423,21 @@ def main() -> int:
         child.stdin.write(config)
         child.stdin.flush()
         del config
+
+        def report_child_state() -> None:
+            while True:
+                qemu_alive = child is not None and child.poll() is None
+                ffmpeg_alive = mux is not None and mux.poll() is None
+                _write_child_state_marker(qemu_alive, ffmpeg_alive)
+                if child_state_stop.wait(0.25):
+                    return
+
+        child_state_thread = threading.Thread(
+            target=report_child_state,
+            name="yi-child-state-reporter",
+            daemon=True,
+        )
+        child_state_thread.start()
 
         def drain_stderr() -> None:
             assert child is not None and child.stderr is not None
@@ -566,6 +606,9 @@ def main() -> int:
             return 0 if ok else 1
         return 0
     finally:
+        child_state_stop.set()
+        if child_state_thread is not None:
+            child_state_thread.join(timeout=0.5)
         _close_pipe(video_pipe)
         _close_pipe(audio_pipe)
         _close_pipe(output_file)
@@ -573,6 +616,7 @@ def main() -> int:
             child.kill()
         if mux is not None and mux.poll() is None:
             mux.kill()
+        _write_child_state_marker(False, False)
         if material is not None:
             material.clear()
 
