@@ -64,38 +64,34 @@ Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 
 The App now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256. The normal App QEMU 10.1.5 remains in use.
 
-A full backend/lifecycle/go2rtc test with the pinned runtime passed 150 seconds with `restart_count=0` and more than 22 MB published.
-
 #### One-camera HA OS long-run gate — ACTIVE / FAILING
 
-The rebuilt HA OS App initially streamed PTZ successfully beyond 31 MB with no restart. Continued runtime later showed:
+HA OS still shows runtime recreation after longer operation, including both watchdog `exit=75` and relay `exit=1` observations.
+
+The same exact pinned image has now passed two independent 10-minute development-host tests:
 
 ```text
-desired_running=true
-process_alive=true
-restart_count=3
-last_reason=recreated_after_exit
-last_exit_code=75
-publisher_attached=true
-published_bytes=2228224
-publisher_error=null
+Docker host networking:   generation=1, restart_count=0, 93,192,192 bytes
+Docker bridge/NAT:        generation=1, restart_count=0, 81,264,640 bytes
 ```
 
-Exit `75` means the media-stall supervisor observed no new relay stdout bytes for the configured stall window and recreated the runtime.
+The bridge test showed continuous PPPP/TNP authentication/media progress through the full 600-second window, so ordinary Docker bridge/NAT is ruled out as the cause.
 
-Corrected conclusion:
+Current conclusion:
 
-- FFmpeg 6.0.1 fixes the early FFmpeg 8 regression.
-- A separate longer-duration media stall remains unresolved.
-- The previous 150-second test was not long enough to close the one-camera E2E gate.
+- FFmpeg 6.0.1 fixes the original early FFmpeg 8 regression.
+- The pinned application/runtime stack is stable for at least ten minutes both with host networking and ordinary Docker bridge/NAT outside HA OS.
+- The unresolved failure is HA OS/App-environment specific.
+- Leading remaining categories: AppArmor/protected mode, HA OS/Supervisor-specific firewall/network behavior beyond ordinary Docker bridge, cgroup/resource scheduling/host pressure, or another HA OS runtime constraint.
 - **Do not start the multi-camera HA OS gate yet.**
 
 Next gate:
 
-1. Run the exact pinned `yi-home:phase6d` image on the development laptop for at least 10 minutes using the full persistent backend/lifecycle/shared-go2rtc path and no RTSP consumer.
-2. If it also reaches `exit=75`, isolate the remaining fault below HA/Supervisor in the relay/media/session path.
-3. If it stays stable for 10 minutes, compare HA OS-specific container/network/scheduling constraints.
-4. Only after one-camera long-run stability passes should two-camera HA OS testing resume.
+1. Collect read-only HA OS host/Supervisor evidence around a one-camera failure for AppArmor denials, OOM/killed-process events, cgroup/resource pressure and YI/QEMU/FFmpeg references.
+2. If the logs identify a denial/resource event, follow that evidence directly.
+3. If host logs are clean, run a temporary one-variable HA OS A/B with AppArmor disabled for the local development App only, while preserving bridge networking and the media/runtime configuration.
+4. Restore the security profile immediately after the diagnostic run.
+5. Only after long-run one-camera HA OS stability is proven should two-camera HA OS testing resume.
 
 ### Phase 6D.4 — Architecture support — PLANNED
 
