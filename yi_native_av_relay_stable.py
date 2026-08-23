@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
@@ -48,11 +50,15 @@ EXIT_RELAY_VIDEO_UNIT_VALIDATION = 97
 EXIT_RELAY_WORKER_PIPE_SETUP = 98
 
 # The HA OS stall diagnostic proved both QEMU and FFmpeg remain alive while the
-# relay blocks writing H.264 into FFmpeg. FFmpeg's default max_interleave_delta
-# is 10 seconds, which can let a sparse/delayed audio stream hold video packets
-# long enough to backpressure the single-threaded relay. Keep live publication
-# low-latency by forcing the muxer to release interleaved packets after 500 ms.
-# The finite validation/file path is intentionally unchanged.
+# relay blocks writing H.264 into FFmpeg. Bounding mux interleave alone did not
+# resolve repeated exit=103 stalls, which means the single relay thread can
+# still deadlock itself: once a video pipe write blocks, it can no longer feed
+# an audio packet that FFmpeg may need before it drains more video. Keep the
+# interleave bound and, for live stdout publication only, decouple the two
+# FFmpeg input pipes behind independent writer threads. The watchdog limits a
+# permanently blocked generation, so the per-generation queues remain bounded
+# in time without dropping H.264/AAC packets. The finite validation/file path is
+# intentionally unchanged.
 LIVE_MAX_INTERLEAVE_DELTA_US = 500_000
 
 SAFE_RELAY_STAGES = {
@@ -81,7 +87,7 @@ _AUDIO_RUNTIME_ERRORS = {
 
 
 class _StagePipe:
-    """Transparent pipe proxy that exposes only a fixed blocking stage."""
+    """Transparent synchronous pipe proxy used outside the live async path."""
 
     def __init__(
         self,
@@ -99,6 +105,119 @@ class _StagePipe:
             return self._stream.write(data)
         finally:
             self._set_stage("native_header_read")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+class _AsyncStagePipe:
+    """Queue live packets into one dedicated FFmpeg input writer thread.
+
+    A blocked video writer must never stop the native relay from reading and
+    forwarding audio, and vice versa. Writer failures are re-raised on the next
+    producer write so the existing safe exception classification remains in
+    control. No packet contents or process details are logged or persisted.
+    """
+
+    def __init__(self, stream: BinaryIO, stage: str) -> None:
+        self._stream = stream
+        self.stage = stage
+        self._queue: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._blocked = False
+        self._closed = False
+        self._error: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"yi-{stage.replace('_pipe_write', '')}-pipe-writer",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def blocked(self) -> bool:
+        with self._lock:
+            return self._blocked
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def _set_blocked(self, value: bool) -> None:
+        with self._lock:
+            self._blocked = value
+
+    def _set_error(self, exc: Exception) -> None:
+        with self._lock:
+            if self._error is None:
+                self._error = exc
+
+    def _current_error(self) -> Exception | None:
+        with self._lock:
+            return self._error
+
+    def _write_all(self, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            written = self._stream.write(view)
+            if written is None:
+                return
+            if written <= 0:
+                raise BrokenPipeError("FFmpeg input pipe stopped accepting data")
+            view = view[written:]
+
+    def _run(self) -> None:
+        try:
+            while True:
+                item = self._queue.get()
+                if item is None:
+                    return
+                self._set_blocked(True)
+                try:
+                    self._write_all(item)
+                finally:
+                    self._set_blocked(False)
+        except Exception as exc:
+            self._set_error(exc)
+        finally:
+            try:
+                self._stream.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+    def write(self, data: bytes) -> int:
+        with self._lock:
+            if self._closed:
+                raise ValueError("write to closed async FFmpeg pipe")
+            error = self._error
+        if error is not None:
+            raise error
+        payload = bytes(data)
+        self._queue.put(payload)
+        return len(payload)
+
+    def flush(self) -> None:
+        error = self._current_error()
+        if error is not None:
+            raise error
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._queue.put(None)
+        self._thread.join(timeout=0.5)
+        if self._thread.is_alive():
+            # Shutdown only: interrupt a writer that is still blocked in the
+            # kernel so FFmpeg can observe EOF or the outer supervisor can reap
+            # the generation promptly.
+            try:
+                self._stream.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            self._thread.join(timeout=0.5)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
@@ -246,10 +365,23 @@ def main() -> int:
     original_decode_video = relay.yi_live_relay._decode_video_unit
     native_summary: tuple[int, int, int, int] | None = None
     relay_stage = "native_header_read"
+    live_writers: dict[str, _AsyncStagePipe] = {}
 
     def set_stage(stage: str) -> None:
         nonlocal relay_stage
         relay_stage = stage if stage in SAFE_RELAY_STAGES else "native_header_read"
+
+    def effective_stage() -> str:
+        # A dedicated writer may block while the main relay keeps consuming the
+        # other media channel. Prefer a blocked writer stage over the main-loop
+        # stage so the watchdog reports the actual FFmpeg backpressure point.
+        video_writer = live_writers.get("video")
+        if video_writer is not None and video_writer.blocked:
+            return "video_pipe_write"
+        audio_writer = live_writers.get("audio")
+        if audio_writer is not None and audio_writer.blocked:
+            return "audio_pipe_write"
+        return relay_stage
 
     def diagnostic_log(message: str) -> None:
         nonlocal native_summary
@@ -259,7 +391,7 @@ def main() -> int:
         original_log(message)
 
     def diagnostic_marker_writer(qemu_alive: bool, ffmpeg_alive: bool) -> None:
-        _write_safe_child_state_marker(qemu_alive, ffmpeg_alive, relay_stage)
+        _write_safe_child_state_marker(qemu_alive, ffmpeg_alive, effective_stage())
 
     def diagnostic_read_exact(stream: BinaryIO, length: int) -> bytes:
         set_stage("native_payload_read")
@@ -310,8 +442,13 @@ def main() -> int:
             if output is None:
                 original_log(
                     "live_mux_max_interleave_delta_us="
-                    f"{LIVE_MAX_INTERLEAVE_DELTA_US}"
+                    f"{LIVE_MAX_INTERLEAVE_DELTA_US}; async_input_writers=true"
                 )
+                video_writer = _AsyncStagePipe(video_pipe, "video_pipe_write")
+                audio_writer = _AsyncStagePipe(audio_pipe, "audio_pipe_write")
+                live_writers["video"] = video_writer
+                live_writers["audio"] = audio_writer
+                return mux, video_writer, audio_writer
             return (
                 mux,
                 _StagePipe(video_pipe, "video_pipe_write", set_stage),
@@ -348,6 +485,8 @@ def main() -> int:
             )
         return diagnostic_rc
     finally:
+        for writer in tuple(live_writers.values()):
+            writer.close()
         relay.phase3e._fresh_exact_target = original_resolver
         relay.log = original_log
         relay._write_child_state_marker = original_marker_writer
