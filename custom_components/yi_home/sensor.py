@@ -70,7 +70,7 @@ async def async_setup_entry(
 class YiHomeRuntimeSensor(YiHomeCameraEntity, SensorEntity):
     """Current managed runtime state for one camera."""
 
-    _attr_name = "Runtime status"
+    _attr_translation_key = "runtime_status"
 
     def __init__(self, coordinator: YiHomeCoordinator, stable_id: str) -> None:
         super().__init__(coordinator, stable_id)
