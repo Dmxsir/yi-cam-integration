@@ -1,16 +1,16 @@
 # YI Home Integration – Development Plan
 
-This document expands the high-level roadmap into the implementation order and exit gates for the remaining product work.
+This document tracks the implementation order and exit gates for the remaining product work.
 
-The target architecture remains fixed:
+Target architecture remains fixed:
 
 - **YI Home App/Add-on = engine/runtime**
 - **YI Home Custom Integration = Home Assistant UI/device/entity layer**
-- **Frigate = optional media consumer**
+- **Frigate = optional downstream media consumer**
 
 Development laptop services and hand-edited go2rtc configuration are validation infrastructure only; they are not the final deployment design.
 
-See also [`home-assistant-app-requirements.md`](home-assistant-app-requirements.md) for the current Home Assistant 2026 App packaging/security/discovery requirements.
+See also [`home-assistant-app-requirements.md`](home-assistant-app-requirements.md) and the current checkpoint [`checkpoints/2026-08-23-phase6d3-haos-live-stream.md`](checkpoints/2026-08-23-phase6d3-haos-live-stream.md).
 
 ## Current position
 
@@ -21,179 +21,55 @@ Completed:
 - Phase 4: Frigate interoperability.
 - Phase 5: multi-camera operation and self-healing supervisor.
 - Phase 6A: generic account discovery by secret-safe `stable_id`.
-- Phase 6B: generic runtime path, cross-model proof, capability/profile cache.
-- Phase 6C.1: versioned secret-safe backend/API skeleton and live smoke proof.
-- Phase 6C.2: per-camera runtime lifecycle manager and descendant cleanup proof.
-- Phase 6C.3: HTTP runtime control API for start/stop/restart.
-- Phase 6C.4: HTTP live reprobe, H264/AAC capability refresh, runtime resume and cleanup proof.
-- Phase 6C.5: App-owned managed go2rtc publication, two-camera operation and fault-isolated recovery.
-- Phase 6C.6: authoritative PPPP availability, persistence/startup policy and three-launch restart proof.
+- Phase 6B: generic runtime path, cross-model proof and capability cache.
+- Phase 6C: long-running App backend/service, lifecycle, managed go2rtc, availability and persistence.
+- Phase 6D.1: Home Assistant App/container packaging and HA OS Local App bootstrap.
+- Phase 6D.2: authenticated Integration → App account handoff and persistent secret storage.
+- Phase 6D.3 one-camera HA OS live media: PASS after isolating and fixing the FFmpeg 8 regression.
+- Home Assistant Integration foundation: Supervisor discovery, account flow, 7 camera Devices and 21 status/control entities live in HA OS.
 
-**Phase 6C is complete. Active work starts at Phase 6D — Home Assistant App packaging.**
+**Active gate: Phase 6D.3 multi-camera HA OS E2E and restart isolation.**
 
 ---
 
 ## Phase 6C — App backend/service — COMPLETE
 
-### Phase 6C.1 — Backend state + HTTP API — COMPLETE
+The reusable engine is complete enough for product packaging:
 
-Implemented:
+- versioned secret-safe HTTP API;
+- account discovery and inventory;
+- one supervised native PPPP/TNP runtime per `stable_id`;
+- start/stop/restart APIs;
+- bounded live reprobe and capability refresh;
+- one shared managed go2rtc publisher;
+- stable App-owned stream identity;
+- two-camera publication and scoped recovery proof;
+- authoritative `PPPP_CheckDevOnline` availability;
+- durable desired-running policy;
+- persistent `/data` capability/runtime/publisher state.
 
-- Long-running backend state core.
-- `GET /api/v1/health`.
-- `GET /api/v1/cameras`.
-- `GET /api/v1/cameras/{stable_id}`.
-- `GET /api/v1/cameras/{stable_id}/status`.
-- `POST /api/v1/discover`.
-- Secret-safe capability data.
-- Loopback default and bearer-token requirement for non-loopback binding.
-- Graceful HTTP shutdown.
-
-Live smoke result: `PHASE6C_API_SMOKE=PASS`.
-
-### Phase 6C.2 — Per-camera runtime lifecycle manager — COMPLETE
-
-Implemented:
-
-- One independent runtime controller per `stable_id`.
-- Generic stable-id relay path.
-- Stop/restart selected camera only.
-- Existing media-stall supervisor behavior preserved.
-- Supervisor exit causes lifecycle recreation while desired state remains running.
-- Bounded restart backoff.
-- Graceful global shutdown stops every managed camera.
-- Secret-safe lifecycle state.
-
-Live smoke result: `PHASE6C_LIFECYCLE_SMOKE=PASS`.
-
-### Phase 6C.3 — Runtime control API — COMPLETE
+Live regression gates:
 
 ```text
-POST /api/v1/cameras/{stable_id}/start
-POST /api/v1/cameras/{stable_id}/stop
-POST /api/v1/cameras/{stable_id}/restart
+PHASE6C_API_SMOKE=PASS
+PHASE6C_LIFECYCLE_SMOKE=PASS
+PHASE6C_REPROBE_SMOKE=PASS
+PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS
+PHASE6C_MEDIA_ISOLATION_SMOKE=PASS
+PHASE6C_PERSISTENCE_SMOKE=PASS
 ```
 
-Implemented idempotent lifecycle behavior, structured state, operation serialization per camera and isolation between different cameras.
-
-### Phase 6C.4 — Reprobe + capability refresh — COMPLETE
-
-Implemented reusable bounded live reprobe, capability cache update only after observed H264 + AAC success, runtime isolation/resume and bounded descendant cleanup.
-
-Live result: `PHASE6C_REPROBE_SMOKE=PASS`.
-
-### Phase 6C.5 — App-owned media publication — COMPLETE
-
-Architecture:
-
-```text
-per-camera Lifecycle Manager
-        |
-        | supervised MPEG-TS stdout
-        v
-HTTP incoming MPEG-TS ingest
-        |
-        v
-shared App-managed go2rtc
-        |
-        +--> RTSP /yi_<stable-id-prefix>
-        +--> future HA/WebRTC consumer path
-        +--> optional Frigate
-```
-
-Implemented:
-
-- immutable stream identity from `stable_id`;
-- shared managed go2rtc;
-- direct lifecycle MPEG-TS push to incoming go2rtc HTTP ingest;
-- media-ready producer detection;
-- MPEG-TS prebuffer so go2rtc receives a full media probe window;
-- camera-only restart/recovery without shared publisher restart;
-- two-camera concurrent streams and scoped fault isolation.
-
-Live results:
-
-- `PHASE6C_MEDIA_PUBLISHER_SMOKE=PASS`.
-- `PHASE6C_MEDIA_ISOLATION_SMOKE=PASS`.
-
-### Phase 6C.6 — Availability, persistence and startup policy — COMPLETE
-
-#### Authoritative availability
-
-The cloud list is not a live online-state source: all seven cameras returned `online=true` and `state=1`. The YI official-client `PPPP_CheckDevOnline` path produced the exact app UI result:
-
-```text
-online_count=4
-offline_count=3
-unknown_count=0
-cloud_hint_disagreement_count=3
-PHASE6_ONLINE_STATUS_PROBE=PASS
-```
-
-Online: `צד בית`, `מחסן`, `ptz`, `pool`.
-
-Offline: `Living room`, `patio`, `zforce 800`.
-
-`cloud_online_reported` is therefore diagnostic only. New product availability fields are `availability_state`, `availability_source`, `last_online_at` and `availability_error`.
-
-#### Persistent policy
-
-- `start`/`restart` persist `desired_running=true` by immutable `stable_id`.
-- `stop` removes the intent.
-- Newly discovered cameras default to stopped.
-- Desired online cameras are restored after restart.
-- Desired offline cameras remain pending and do not create a PPPP/media runtime.
-- An already-running desired camera that becomes explicitly offline is stopped while its persistent intent remains.
-- `unknown` does not tear down a healthy stream and is not promoted to online.
-- Reprobe does not change persistent intent.
-- Initial YI cloud failure keeps the service alive and pending intent is retained for retry.
-
-Persistent layout:
-
-```text
-/data/capabilities.json
-/data/runtime-policy.json
-/data/runtime/
-/data/publisher/
-```
-
-#### Final live proof
-
-The updated persistence smoke passed all regression and live gates:
-
-- 5 persistence/availability tests PASS;
-- PTZ + pool dual H264/AAC RTSP PASS;
-- offline zforce start deferred with no runtime PASS;
-- capability cache under persistent data PASS;
-- reprobe preserved intent PASS;
-- backend shutdown/restart restored both online desired streams PASS;
-- offline zforce remained pending/stopped after restart PASS;
-- explicit stop and pending-intent clear persisted PASS;
-- third launch restored only PTZ while pool stayed stopped PASS;
-- policy cleanup and publisher/service shutdown PASS;
-- `PHASE6C_PERSISTENCE_SMOKE=PASS`.
-
-Exit gate: PASS. **Phase 6C is complete.**
+Exit gate: PASS.
 
 ---
 
 ## Phase 6D — Home Assistant App/Add-on packaging — ACTIVE
 
-Goal: move the proven engine from development infrastructure into an HA OS/Supervisor-managed App with no development-machine paths.
+Goal: run the proven engine as an HA OS/Supervisor-managed App with no development-machine dependency.
 
-Current official Home Assistant 2026 requirements used by this phase:
+### Phase 6D.1 — Container/runtime packaging — COMPLETE
 
-- repository root contains `repository.yaml`;
-- each App has its own folder with `config.yaml` and Dockerfile;
-- Dockerfile uses an explicit `FROM` image (implicit `BUILD_FROM` fallback was removed in Supervisor 2026.04.0);
-- `/data` is persistent App storage;
-- Home Assistant and Apps communicate on the internal App network;
-- `/discovery*` Supervisor API calls are available for App discovery;
-- protected mode, AppArmor and least privilege are preferred.
-
-### Phase 6D.1 — Container/runtime packaging — ACTIVE
-
-Initial scaffold implemented:
+Implemented/proven:
 
 ```text
 repository.yaml
@@ -207,132 +83,239 @@ yi_home/
   DOCS.md
   CHANGELOG.md
   translations/en.yaml
-  rootfs/               # generated locally, intentionally gitignored
+  rootfs/               # generated locally, gitignored
 ```
 
-Packaging decisions:
+Runtime/security decisions:
 
-- initial advertised architecture: `amd64` only;
-- explicit base: `ghcr.io/home-assistant/base:3.23`;
-- runtime packages: Python 3, `py3-cryptography`, FFmpeg/ffprobe, `qemu-aarch64`;
-- managed publisher: go2rtc `1.9.14`, downloaded during image build and verified against the known SHA-256 used by the proven Phase 6C path;
-- application code path: `/opt/yi-home/app`;
-- guest runtime path: `/opt/yi-home/runtime/bionic-root`;
-- persistent state: `/data`;
-- backend internal port: TCP 8099;
-- RTSP: TCP 8554.
+- `amd64` initial advertised architecture;
+- explicit `ghcr.io/home-assistant/base:3.23` base;
+- Python 3 + cryptography;
+- `qemu-aarch64` for the proven native worker path;
+- managed go2rtc `1.9.14` with pinned SHA-256;
+- application path `/opt/yi-home/app`;
+- Bionic/native guest root `/opt/yi-home/runtime/bionic-root`;
+- persistent App state `/data`;
+- backend TCP 8099 only on the internal App network;
+- optional RTSP TCP 8554 exposure;
+- protected/AppArmor operation without host network/full access/Docker API.
 
-`tools/prepare_ha_app_context.py` stages the already-proven development runtime into the App Docker context because a Home Assistant App folder is its build context. It copies top-level Python engine modules, Phase 3 probe/runtime Python helpers and the proven Bionic/native tree. It explicitly refuses/strips development secrets/state such as `.env.local`, backend API tokens, runtime policy and capability state. A secret-safe SHA-256 runtime manifest is generated in the staged image tree.
+`tools/prepare_ha_app_context.py` stages only the proven engine/native runtime and rejects development secrets/state.
 
-`tools/phase3_pppp_probe/run_phase6d_app_context_smoke.sh` validates:
+`tools/phase3_pppp_probe/run_phase6d_app_context_smoke.sh` validates App artifacts, security constraints, Python compilation, native availability exports, secret-safe staging and the actual Docker image when enabled.
 
-- required App files;
-- required Bionic/native artifacts;
-- no leaked secret/state files;
-- no development `~/Documents`/`.analysis` paths in App runtime config;
-- no host-network/full-access/Docker-API privileges;
-- Supervisor discovery wiring;
-- mode-0600 API token persistence wiring;
-- authoritative `PPPP_CheckDevOnline` library export;
-- staged Python compilation;
-- optional actual Docker build with `YI_PHASE6D_DOCKER_BUILD=1`.
+HA OS Local App is proven as:
 
-Next 6D.1 gates:
+```text
+slug=local_yi_home
+source=/addons/yi_home
+protected=true
+host_network=false
+full_access=false
+docker_api=false
+```
 
-1. `PHASE6D_APP_CONTEXT_SMOKE=PASS` on the development machine.
-2. Actual amd64 Docker image build PASS.
-3. HA OS Local App install/start PASS.
-4. Backend health reachable from the App container.
-5. Supervisor discovery `yi_home` emitted successfully.
-6. AppArmor adjusted only from concrete HA OS audit evidence.
+Exit gate: PASS.
 
-### Phase 6D.2 — Configuration, storage and secrets — PLANNED
+### Phase 6D.2 — Configuration, storage and secrets — COMPLETE
 
-Already scaffolded:
+Implemented/proven:
 
-- `/run.sh` creates/loads a strong mode-0600 `/data/backend-api-token`.
-- Backend binds `0.0.0.0:8099` with bearer authentication because HA Core is a separate container.
-- Supervisor discovery payload contains only `host`, internal API port/version/token and RTSP port; it never contains YI account/camera credentials.
-- An empty restrictive `/data/yi.env` allows the App/backend to boot before account setup while initial cloud discovery remains pending/retrying.
+- mode-0600 `/data/backend-api-token` generated/reused by the App;
+- bearer authentication required for the non-loopback backend bind;
+- Supervisor discovery carries only internal App connection information;
+- authenticated `GET /api/v1/account` and `POST /api/v1/account`;
+- account login/device-list validation before persistence;
+- atomic restrictive `/data/yi.env` persistence;
+- YI password never stored in HA Config Entry;
+- cloud session tokens and raw camera connection material never returned by account/status APIs;
+- account state and initial discovery survive App restart;
+- no implicit auto-start of every discovered camera.
 
-Still to implement:
+The Home Assistant Config Flow now performs the account handoff directly through the authenticated App API.
 
-- authenticated Integration → App credential-write/reauth API;
-- restrictive persistent YI credential store without readback/log exposure;
-- account configuration lifecycle and reauthentication semantics;
-- token rotation/recovery behavior.
+Exit gate: PASS.
 
-### Phase 6D.3 — Networking and health — PLANNED
+### Phase 6D.3 — Networking, health and live media — ACTIVE
 
-Current scaffold:
+Already proven:
 
-- no host network;
-- no full access;
-- no Docker API;
-- no Home Assistant config-directory mapping;
-- backend API has no host port mapping;
-- RTSP 8554 is mapped for optional external consumers;
-- custom AppArmor profile exists and will be tightened/refined after first HA OS run.
+- Home Assistant Core consumes Supervisor/App discovery;
+- Integration reaches App backend on the internal App network;
+- account configuration works from HA UI;
+- 7 camera Devices and 21 entities are registered;
+- Stream switch starts/stops durable App runtime intent;
+- Online and Runtime entities expose secret-safe state;
+- one-camera HA OS live stream is stable.
 
-Still to prove/add:
+#### FFmpeg 8 regression — RESOLVED
 
-- HA Core reaches backend over internal App network using Supervisor discovery data;
-- add Supervisor watchdog after the packaged health endpoint is proven in HA OS;
-- verify shutdown/restart semantics under Supervisor.
+The original HA OS live test repeatedly stalled after roughly 20–30 seconds with lifecycle exit code `75`.
+
+The fault was reproduced in the exact App image outside Home Assistant. This ruled out HA Core, Supervisor, AppArmor, Integration polling and Frigate as the primary cause.
+
+A/B isolation:
+
+```text
+Alpine + QEMU 8.2.2 + FFmpeg 8.0.1 = FAIL after roughly 20–30 s
+Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
+```
+
+The full backend/lifecycle/go2rtc pipeline using the normal App QEMU 10.1.5 plus FFmpeg 6.0.1-static passed 150 seconds with:
+
+```text
+restart_count=0
+last_exit_code=null
+publisher_attached=true
+publisher_error=null
+published_bytes=22020096
+```
+
+Therefore QEMU is not the root cause.
+
+Packaging fix:
+
+- remove Alpine's unpinned `ffmpeg` package from the App runtime;
+- pin FFmpeg and ffprobe `6.0.1-static`;
+- verify archive SHA-256 during build;
+- install binaries under `/usr/local/bin`;
+- enforce exact FFmpeg/ffprobe version in Phase 6D App-context Docker smoke.
+
+Build gate after the fix:
+
+```text
+pinned_ffmpeg_runtime=PASS
+docker_ffmpeg_pin=PASS
+docker_build=PASS
+PHASE6D_APP_CONTEXT_SMOKE=PASS
+```
+
+#### One-camera HA OS live E2E — COMPLETE
+
+After rebuilding `local_yi_home` with the pinned FFmpeg runtime, the `ptz` camera remained stable:
+
+```text
+desired_running=true
+process_alive=true
+restart_count=0
+last_reason=started
+last_exit_code=null
+publisher_attached=true
+published_bytes=31719424
+publisher_error=null
+```
+
+This closes the one-camera live-stream gate.
+
+#### Next live gate — multi-camera HA OS E2E
+
+Run the following proof without changing product architecture:
+
+1. Keep `ptz` running.
+2. Enable `pool` from its Home Assistant Stream entity.
+3. Observe both runtimes for at least 3–5 minutes.
+4. Require for both:
+
+```text
+desired_running=true
+process_alive=true
+restart_count=0
+last_exit_code=null
+publisher_attached=true
+publisher_error=null
+published_bytes increasing
+```
+
+5. Stop or restart exactly one camera and prove the other camera remains running with unchanged restart count/generation.
+6. Require the shared go2rtc process to remain alive and unchanged.
+7. Restart the App and prove only persisted desired-running + authoritative-online cameras are restored.
+8. Re-check both runtime entities after restoration.
+
+If all eight gates pass, mark Phase 6D.3 multi-camera/restart behavior PASS.
 
 ### Phase 6D.4 — Architecture support — PLANNED
 
-- Advertise `amd64` only until full container proof passes.
-- Verify native/QEMU path independently on `aarch64` before adding it to `config.yaml`.
+- Keep `amd64` only for the initial product.
+- Prove the full native/QEMU/media path independently on `aarch64` before advertising it.
 - Fail clearly on unsupported architectures.
 
-Phase 6D exit gate:
+### Phase 6D exit gate
 
-- Fresh HA OS App install starts successfully.
-- Integration can configure the YI account through the authenticated internal API.
-- Discovery returns account cameras with authoritative availability.
-- At least two streams are served directly from the App.
-- App restart restores operation.
-- No terminal, manual RTSP/YAML or development-machine file paths are required.
+Require all of the following:
+
+- fresh HA OS App install/start;
+- Integration-driven account setup;
+- automatic inventory and HA device/entity registration;
+- at least two simultaneous App-owned live streams;
+- independent stream lifecycle behavior;
+- App restart restores persisted desired-running online streams;
+- no terminal/manual UID/DID/model/RTSP/YAML/Android dependency in normal product use.
 
 ---
 
-## Phase 6E — Home Assistant Custom Integration
+## Phase 6E — Home Assistant Custom Integration — ACTIVE
 
-### Phase 6E.1 — Config Flow
+Implementation began in parallel with Phase 6D because the HA OS packaging/security gates require the real Integration path.
 
-- Consume Supervisor/App discovery through `async_step_hassio`.
-- Validate backend API version and health.
-- Guide account setup without exposing PPPP/TNP internals.
+### Phase 6E.1 — Config Flow — FOUNDATION COMPLETE
 
-### Phase 6E.2 — Device Registry
+Implemented/proven:
 
-- One HA Device per camera.
-- Unique identity based on `stable_id`.
-- Camera rename does not create a new device.
+- `async_step_hassio` consumes YI Home Supervisor discovery;
+- backend health/API validation;
+- App-required fallback for manual invocation;
+- region/account form;
+- authenticated account handoff;
+- HA Config Entry excludes YI password.
 
-### Phase 6E.3 — Entities
+Remaining:
 
-- `camera` entity.
-- authoritative availability/runtime status.
-- optional diagnostic cloud hint.
-- restart/reprobe controls where useful.
+- final reauthentication/error UX.
 
-### Phase 6E.4 — Diagnostics
+### Phase 6E.2 — Device Registry — COMPLETE FOR CURRENT INVENTORY
 
-- App/API version.
-- Safe camera metadata.
-- Runtime/restart counters.
-- Capability/publication/availability state.
-- Explicit redaction tests.
+- one HA Device per camera;
+- immutable identity derived from secret-safe camera identity;
+- 7 devices live-registered.
 
-Exit gate:
+### Phase 6E.3 — Status/control entities — FOUNDATION COMPLETE
 
-- Add Integration → YI Home creates devices/entities automatically and live view works without YAML.
+Currently live:
+
+- authoritative Online binary sensor;
+- Runtime status sensor with safe lifecycle attributes;
+- Stream switch controlling App start/stop intent;
+- 3 entities per camera, 21 total for the current account.
+
+Remaining:
+
+- camera/live-view entity backed by the App-owned media path;
+- polished translations/entity names;
+- dynamic device additions without reload where practical;
+- additional controls only where they remain generic and safe.
+
+### Phase 6E.4 — Diagnostics — ACTIVE
+
+Keep diagnostics limited to safe information:
+
+- API/App version;
+- stable secret-safe camera metadata;
+- availability/runtime state;
+- restart counters;
+- publication state;
+- explicit redaction tests.
+
+Never expose YI passwords, camera passwords, cloud/session tokens, App bearer tokens, UID/DID, PPPP InitString or raw connection material.
+
+Phase 6E exit gate:
+
+- Add YI Home Integration automatically creates camera devices/entities and live camera view without YAML or PPPP/TNP internals.
 
 ---
 
 ## Phase 6F — Zero-manual-config onboarding
+
+Target flow:
 
 ```text
 Install YI Home App
@@ -349,22 +332,24 @@ No UID/DID/model/TNP/RTSP/YAML required.
 
 ## Phase 6G — Frigate integration/export
 
-- Stable App-owned RTSP URLs.
-- Safe generated example/config helper.
-- H264 + AAC recording path.
-- Frigate absence/failure never affects core Home Assistant camera support.
+Only after the App-native media lifecycle is proven on HA OS:
+
+- consume stable App-owned RTSP URLs from Frigate;
+- validate H264 + AAC recording/detection path;
+- provide a safe generated configuration/export helper later;
+- Frigate absence/failure must never affect core App/Integration runtime.
 
 ---
 
 ## Post-product enhancements
 
-- Native timestamp/timebase cleanup.
-- More protocol/profile coverage.
-- PTZ/camera controls.
-- Motion/event integration.
-- Reduce/eliminate QEMU where practical.
-- Release automation, versioning, App repository and HACS distribution.
+- native timestamp/timebase cleanup;
+- more protocol/profile coverage;
+- PTZ/camera controls;
+- motion/event integration;
+- reduce/eliminate QEMU where practical;
+- release automation/versioning/App repository/HACS distribution.
 
 ## Engineering rule
 
-Every new Phase 6 feature is reusable App/backend functionality first. Development CLIs and shell scripts remain validation adapters and must never become required parts of the final Home Assistant UX.
+Every new Phase 6 feature must remain reusable App/backend/Integration functionality. Development CLIs and shell scripts are validation adapters only and must never become required parts of the final Home Assistant UX.
