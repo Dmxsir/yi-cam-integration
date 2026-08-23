@@ -19,8 +19,14 @@ INVENTORY_REFRESH_SECONDS = 300.0
 class YiHomeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Refresh secret-safe camera state from the YI Home App."""
 
-    def __init__(self, hass: HomeAssistant, api: YiHomeApi) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: YiHomeApi,
+        config_entry_id: str,
+    ) -> None:
         self.api = api
+        self._config_entry_id = config_entry_id
         self._next_inventory_refresh_at = 0.0
         super().__init__(
             hass,
@@ -65,7 +71,9 @@ class YiHomeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             if not isinstance(name, str) or not name.strip():
                 continue
-            device = registry.async_get_device(identifiers={(DOMAIN, stable_id)})
+            device = registry.async_get_device_by_identifier(
+                (DOMAIN, stable_id), self._config_entry_id
+            )
             if device is None or device.name == name:
                 continue
             # Update only the integration-provided source name. A user-defined
