@@ -56,6 +56,53 @@ class YiNativeAvRelayStableDiagnosticsTests(unittest.TestCase):
             with self.subTest(stage=stage):
                 self.assertEqual(stable._classify_relay_exception(exc), (code, stage))
 
+    def test_classifies_known_runtime_error_stages_without_exposing_message(self) -> None:
+        cases = [
+            (
+                RuntimeError("truncated native stream header"),
+                stable.EXIT_RELAY_NATIVE_STREAM_HEADER,
+                "relay_native_stream_header",
+            ),
+            (
+                RuntimeError("invalid native stream framing"),
+                stable.EXIT_RELAY_NATIVE_STREAM_HEADER,
+                "relay_native_stream_header",
+            ),
+            (
+                RuntimeError("invalid native media record"),
+                stable.EXIT_RELAY_NATIVE_MEDIA_RECORD,
+                "relay_native_media_record",
+            ),
+            (
+                RuntimeError("decrypted AAC payload has no native ADTS header"),
+                stable.EXIT_RELAY_AUDIO_UNIT_VALIDATION,
+                "relay_audio_unit_validation",
+            ),
+            (
+                RuntimeError("AAC format changed during live session"),
+                stable.EXIT_RELAY_AUDIO_FORMAT_CHANGED,
+                "relay_audio_format_changed",
+            ),
+            (
+                RuntimeError("Phase 2E expected H.264 codec id 78, got 999"),
+                stable.EXIT_RELAY_VIDEO_UNIT_VALIDATION,
+                "relay_video_unit_validation",
+            ),
+            (
+                RuntimeError("Phase 2E received an unrecognized H.264 payload framing"),
+                stable.EXIT_RELAY_VIDEO_UNIT_VALIDATION,
+                "relay_video_unit_validation",
+            ),
+            (
+                RuntimeError("failed to create native worker pipes"),
+                stable.EXIT_RELAY_WORKER_PIPE_SETUP,
+                "relay_worker_pipe_setup",
+            ),
+        ]
+        for exc, code, stage in cases:
+            with self.subTest(stage=stage):
+                self.assertEqual(stable._classify_relay_exception(exc), (code, stage))
+
     def test_unknown_exception_uses_generic_safe_code(self) -> None:
         class CustomFailure(Exception):
             pass
