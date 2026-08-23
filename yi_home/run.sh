@@ -8,6 +8,7 @@ RTSP_PORT=8554
 TOKEN_FILE="/data/backend-api-token"
 ENV_FILE="/data/yi.env"
 BACKEND_PID=""
+BACKEND_STOP_TIMEOUT_SECONDS=20
 
 mkdir -p /data
 chmod 0700 /data 2>/dev/null || true
@@ -48,10 +49,30 @@ export YI_ADDON_API_TOKEN="${API_TOKEN}"
 export PYTHONUNBUFFERED=1
 
 terminate_backend() {
-  if [[ -n "${BACKEND_PID}" ]] && kill -0 "${BACKEND_PID}" 2>/dev/null; then
-    kill -TERM "${BACKEND_PID}" 2>/dev/null || true
-    wait "${BACKEND_PID}" 2>/dev/null || true
+  local pid="${BACKEND_PID}"
+  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+    return
   fi
+
+  bashio::log.info "Stopping YI Home backend gracefully..."
+  kill -TERM "${pid}" 2>/dev/null || true
+
+  # Never let an App stop/restart block indefinitely on the backend. The
+  # backend normally shuts down in a few seconds; this bounded grace period
+  # still gives camera runtimes and go2rtc time to terminate cleanly.
+  local ticks=$((BACKEND_STOP_TIMEOUT_SECONDS * 2))
+  for _ in $(seq 1 "${ticks}"); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      wait "${pid}" 2>/dev/null || true
+      bashio::log.info "YI Home backend stopped cleanly."
+      return
+    fi
+    sleep 0.5
+  done
+
+  bashio::log.warning "YI Home backend exceeded the shutdown grace period; forcing termination."
+  kill -KILL "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
 }
 trap terminate_backend TERM INT
 
