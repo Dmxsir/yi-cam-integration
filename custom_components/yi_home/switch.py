@@ -31,7 +31,7 @@ async def async_setup_entry(
 class YiHomeStreamSwitch(YiHomeCameraEntity, SwitchEntity):
     """Persist and control desired-running state for one YI camera."""
 
-    _attr_name = "Stream"
+    _attr_translation_key = "stream"
 
     def __init__(self, coordinator: YiHomeCoordinator, stable_id: str) -> None:
         super().__init__(coordinator, stable_id)
