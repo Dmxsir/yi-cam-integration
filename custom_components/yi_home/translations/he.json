@@ -1,0 +1,31 @@
+{
+  "title": "YI Home",
+  "config": {
+    "step": {
+      "hassio_account": {
+        "title": "חיבור לחשבון YI Home",
+        "description": "הזן את פרטי חשבון YI Home. הסיסמה נשלחת ישירות ל־YI Home App ואינה נשמרת ב־Config Entry של Home Assistant.",
+        "data": {
+          "account": "חשבון",
+          "password": "סיסמה",
+          "country": "קוד מדינה",
+          "region": "אזור שרת"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "לא ניתן להתחבר ל־YI Home App.",
+      "invalid_auth": "YI דחה את פרטי החשבון.",
+      "rate_limited": "YI הגביל זמנית ניסיונות התחברות. נסה שוב מאוחר יותר.",
+      "account_setup_failed": "לא ניתן היה להגדיר את חשבון YI."
+    },
+    "abort": {
+      "app_required": "יש להתקין ולהפעיל תחילה את YI Home App.",
+      "invalid_discovery": "YI Home App פרסם נתוני discovery לא תקינים.",
+      "cannot_connect": "לא ניתן להתחבר ל־YI Home App שזוהה.",
+      "unsafe_backend": "YI Home App החזיר מצב backend שאינו בטוח.",
+      "app_auth_failed": "Home Assistant לא הצליח להזדהות מול YI Home App.",
+      "already_configured": "YI Home כבר מוגדר."
+    }
+  }
+}
