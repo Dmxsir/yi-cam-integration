@@ -13,13 +13,23 @@ from .entity import YiHomeCameraEntity
 
 _FAILURE_STAGE_BY_EXIT_CODE = {
     1: "relay_failure_legacy",
-    75: "media_stall",
+    75: "media_stall_process_state_unavailable",
+    76: "media_stall_qemu_alive_ffmpeg_alive",
+    77: "media_stall_qemu_alive_ffmpeg_missing",
+    78: "media_stall_qemu_missing_ffmpeg_alive",
+    79: "media_stall_qemu_missing_ffmpeg_missing",
     81: "native_worker_exit",
     82: "mpegts_mux_exit",
     83: "no_video_frames",
     84: "no_audio_frames",
     85: "relay_exception",
     86: "relay_failure_unclassified",
+    87: "relay_eof",
+    88: "relay_runtime_error",
+    89: "relay_timeout",
+    90: "relay_broken_pipe",
+    91: "relay_os_error",
+    92: "relay_value_error",
 }
 
 
