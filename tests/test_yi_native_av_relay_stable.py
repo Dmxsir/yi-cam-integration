@@ -3,11 +3,47 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import yi_native_av_relay_stable as stable
+
+
+class _BlockingSink:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes | memoryview) -> int:
+        self.entered.set()
+        if not self.release.wait(1.0):
+            raise TimeoutError("test sink remained blocked")
+        raw = bytes(data)
+        self.writes.append(raw)
+        return len(raw)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ImmediateSink:
+    def __init__(self) -> None:
+        self.written = threading.Event()
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes | memoryview) -> int:
+        raw = bytes(data)
+        self.writes.append(raw)
+        self.written.set()
+        return len(raw)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class YiNativeAvRelayStableDiagnosticsTests(unittest.TestCase):
@@ -176,6 +212,31 @@ class YiNativeAvRelayStableDiagnosticsTests(unittest.TestCase):
     def test_non_pipe_command_is_not_modified(self) -> None:
         original = ["ffmpeg", "-f", "mpegts", "capture.ts"]
         self.assertEqual(stable._bound_live_interleave_command(original), original)
+
+    def test_async_live_writers_keep_audio_moving_while_video_blocks(self) -> None:
+        video_sink = _BlockingSink()
+        audio_sink = _ImmediateSink()
+        video = stable._AsyncStagePipe(video_sink, "video_pipe_write")
+        audio = stable._AsyncStagePipe(audio_sink, "audio_pipe_write")
+        try:
+            self.assertEqual(video.write(b"video-1"), len(b"video-1"))
+            self.assertTrue(video_sink.entered.wait(0.5))
+            self.assertTrue(video.blocked)
+
+            # A second video packet is queued instead of blocking the producer.
+            self.assertEqual(video.write(b"video-2"), len(b"video-2"))
+
+            # Most importantly, audio has its own writer and still reaches its
+            # FFmpeg input while the video writer remains blocked.
+            self.assertEqual(audio.write(b"audio-1"), len(b"audio-1"))
+            self.assertTrue(audio_sink.written.wait(0.5))
+            self.assertEqual(audio_sink.writes, [b"audio-1"])
+        finally:
+            video_sink.release.set()
+            video.close()
+            audio.close()
+
+        self.assertEqual(video_sink.writes, [b"video-1", b"video-2"])
 
 
 if __name__ == "__main__":
