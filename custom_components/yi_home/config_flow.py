@@ -8,6 +8,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
@@ -54,7 +55,9 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
             str(self._discovery[CONF_API_TOKEN]),
         )
 
-    async def _create_entry(self, *, region: str | None = None, country: str | None = None) -> ConfigFlowResult:
+    async def _create_entry(
+        self, *, region: str | None = None, country: str | None = None
+    ) -> ConfigFlowResult:
         assert self._discovery is not None
         data: dict[str, Any] = {
             CONF_HOST: self._discovery[CONF_HOST],
@@ -71,12 +74,16 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(title=self._app_name, data=data)
 
     @override
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """YI Home is configured through its Home Assistant App discovery."""
         return self.async_abort(reason="app_required")
 
     @override
-    async def async_step_hassio(self, discovery_info: HassioServiceInfo) -> ConfigFlowResult:
+    async def async_step_hassio(
+        self, discovery_info: HassioServiceInfo
+    ) -> ConfigFlowResult:
         """Handle discovery published by the YI Home App."""
         await self._async_handle_discovery_without_unique_id()
 
@@ -148,9 +155,13 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="hassio_account",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ACCOUNT): str,
-                    vol.Required(CONF_PASSWORD): str,
-                    vol.Required(CONF_COUNTRY, default=DEFAULT_COUNTRY): str,
+                    vol.Required(CONF_ACCOUNT): selector.TextSelector(),
+                    vol.Required(CONF_PASSWORD): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD
+                        )
+                    ),
+                    vol.Required(CONF_COUNTRY, default=DEFAULT_COUNTRY): selector.TextSelector(),
                     vol.Required(CONF_REGION, default=DEFAULT_REGION): vol.In(REGIONS),
                 }
             ),
