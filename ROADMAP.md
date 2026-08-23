@@ -64,11 +64,9 @@ Alpine + QEMU 8.2.2 + FFmpeg 6.0.1-static = PASS for 60 s
 
 The App now pins FFmpeg/ffprobe 6.0.1-static with a fixed archive SHA-256. The normal App QEMU 10.1.5 remains in use.
 
-#### One-camera HA OS long-run gate — ACTIVE / LOWER-LEVEL FAILURE NOT YET CLASSIFIED
+#### One-camera HA OS long-run gate — ACTIVE / MIXED LOWER-LEVEL FAILURE MODES
 
-HA OS continues to show runtime recreation after apparently healthy publication. Observed supervised exits include both `75` (media stall watchdog) and generic relay `1`.
-
-The same exact pinned image passed two independent 10-minute development-host tests:
+HA OS continues to show runtime recreation after apparently healthy publication. The same exact pinned image passed two independent 10-minute development-host tests:
 
 ```text
 Docker host networking:   generation=1, restart_count=0, 93,192,192 bytes
@@ -79,32 +77,53 @@ Ordinary Docker bridge/NAT is therefore ruled out.
 
 A first HA OS test with AppArmor disabled happened to pass for roughly ten minutes, but repeat testing with `apparmor: false` failed within a few minutes with `restart_count=2` and `exit=1`. Broad AppArmor A/Bs for `network,`, `signal,`, and combined `unix, + capability, + ptrace,` also failed. AppArmor is therefore **ruled out as the primary cause**; the earlier successful disabled-profile run was intermittent rather than causal.
 
+After the first secret-safe diagnostic deployment, PTZ showed both watchdog and relay-exception generations:
+
+```text
+restart_count=1  last_exit_code=75
+restart_count=3  last_exit_code=85
+restart_count=4  last_exit_code=75
+```
+
 Current conclusion:
 
 - FFmpeg 6.0.1 fixes the original FFmpeg 8 regression.
 - The pinned image/runtime stack is stable for at least ten minutes under both host networking and ordinary Docker bridge/NAT outside HA OS.
-- The remaining failure is specific to the HA OS/App execution context or to a lower-level session behavior that the current HA status does not classify.
-- Further security/network rule guessing is not useful.
-- The next gate is **secret-safe lower-level failure observability**.
+- The HA OS failure is not explained by AppArmor and is not one single generic relay exit path.
+- At least one generation stalls while the relay process remains alive for the 12-second watchdog window (`75`), while another reached an uncaught relay exception (`85`).
+- Further HA OS security/network rule guessing is not useful.
+- The next gate is **secret-safe lower-level failure observability inside the existing relay/supervisor path**.
 
-Diagnostic relay exit codes added for the next HA OS run:
+Refined diagnostic exit codes for the next HA OS run:
 
 ```text
-75 = supervisor media stall
+75 = media stall; descendant process state unavailable/startup stall
+76 = media stall; qemu-aarch64 alive + ffmpeg alive
+77 = media stall; qemu-aarch64 alive + ffmpeg missing
+78 = media stall; qemu-aarch64 missing + ffmpeg alive
+79 = media stall; qemu-aarch64 missing + ffmpeg missing
 81 = native PPPP/TNP worker exited non-zero
 82 = FFmpeg MPEG-TS mux exited non-zero
 83 = zero video frames
 84 = zero audio frames
-85 = unhandled relay exception (message suppressed)
+85 = other uncaught relay exception
 86 = safely unclassified relay failure
+87 = relay EOFError
+88 = relay RuntimeError
+89 = relay subprocess TimeoutExpired
+90 = relay BrokenPipeError
+91 = relay OSError
+92 = relay ValueError
 ```
+
+The stall codes inspect only descendant process names through `/proc` immediately before watchdog termination; they do not surface PIDs, command lines or camera/runtime secrets. Exception classification uses only the exception class, never the exception message.
 
 Next gate:
 
-1. Restore the normal restrictive AppArmor profile.
-2. Deploy the updated App runtime with structured failure exit classification.
-3. Run PTZ only until the first recreation.
-4. Follow the specific lower-level stage reported by the new exit code instead of changing unrelated HA OS settings.
+1. Keep the normal restrictive AppArmor profile and PTZ-only scope.
+2. Deploy the refined diagnostic App runtime.
+3. Run until the first one or two recreations rather than waiting for a long-duration pass.
+4. Follow the specific lower-level stage reported by `last_exit_code`.
 5. Only after one-camera long-run stability is proven should two-camera HA OS testing resume.
 
 ### Phase 6D.4 — Architecture support — PLANNED
