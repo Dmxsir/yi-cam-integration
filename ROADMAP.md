@@ -4,14 +4,16 @@ The target product architecture is documented in [`docs/product-architecture.md`
 The detailed implementation sequence and exit gates are documented in [`docs/development-plan.md`](docs/development-plan.md).
 Home Assistant App packaging requirements are documented in [`docs/home-assistant-app-requirements.md`](docs/home-assistant-app-requirements.md).
 
-Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6e-ha-live-view.md`](docs/checkpoints/2026-08-24-phase6e-ha-live-view.md).
+Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md).
 
 ## Product target
 
-- **YI Home App/Add-on = engine/runtime**
-- **YI Home Custom Integration = Home Assistant UI/devices/entities**
+- **YI RTSP App = engine/runtime**
+- **YI Camera Connect = Home Assistant UI/devices/entities**
 - **Frigate = optional media consumer**
-- No Android phone, ADB, SD-card hack, manual model whitelist, UID/DID entry, per-camera YAML or manual RTSP setup in the final user experience.
+- No Android phone, ADB, SD-card hack, manual model whitelist, UID/DID entry, per-camera YAML or manual RTSP setup in the final Home Assistant user experience.
+
+Current internal `yi_home` identifiers remain unchanged until the explicit compatibility-sensitive rename/repository-split migration.
 
 ## Completed phases
 
@@ -150,28 +152,63 @@ Live-view validation:
 
 Next implementation target:
 
-- availability semantics for offline/stopped/starting/no-media camera states;
-- polished translations/diagnostics and reauthentication UX;
+- polished diagnostics and reauthentication UX;
 - dynamic camera additions where practical;
+- removed-camera runtime cleanup;
 - final secret-redaction tests.
 
 ## Phase 6F — Zero-manual-config onboarding — PLANNED
 
 ```text
-Install YI Home App
- -> Add YI Home Integration
+Install YI RTSP
+ -> Add YI Camera Connect
  -> enter YI account details / region
  -> Found N cameras
  -> Finish
 ```
 
-No UID/DID/model/TNP/RTSP/YAML required from the user.
+No UID/DID/model/TNP/RTSP/YAML required from the user for Home Assistant operation.
 
-## Phase 6G — Frigate integration/export — PLANNED
+## Phase 6G — Frigate integration/export — ACTIVE
 
-- Stable App-owned RTSP endpoints.
+Proven so far:
+
+- Stable App-owned RTSP endpoints are reachable from an external Frigate host through the HA OS host-port mapping.
+- External Frigate ffprobe sees H264 video and AAC audio from the App-owned RTSP path.
+- Frigate live-view feeds are confirmed through the new App path for PTZ-FRONT, pool, warehouse and zforce 800.
+- The old development-laptop PPPP publisher is no longer required for those migrated streams.
 - Frigate remains optional and separate from the core App/Integration lifecycle.
-- Validate Frigate again as a final regression after the HA camera/live-view entity is in place.
+
+Selected product UX:
+
+- Users must not discover stable IDs or manually construct RTSP URLs.
+- YI RTSP owns/configures external RTSP publication.
+- YI Camera Connect resolves the actual HA host plus the App's mapped external RTSP port.
+- Each camera should expose a ready-to-copy Frigate RTSP URL.
+- YI Camera Connect should also generate a Frigate `go2rtc` YAML snippet for eligible cameras.
+- The mapped host port is installation-specific and must never be hard-coded.
+
+Remaining Phase 6G gates:
+
+- Validate Stream OFF -> corresponding Frigate feed stops, then ON -> feed returns.
+- Validate Frigate detection, recording and audio on the App-owned source.
+- Implement reliable Supervisor/App external RTSP port discovery.
+- Expose ready-to-copy per-camera RTSP URLs.
+- Implement generated Frigate `go2rtc` export/snippet UX.
+- Keep all exported/diagnostic data secret-safe.
+
+See [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md).
+
+## Repository split / public naming
+
+Selected public names:
+
+```text
+App:          YI RTSP
+Integration:  YI Camera Connect
+```
+
+Before public distribution the monorepo will be split into independent App and Integration repositories after the cross-component API and compatibility migration are stable. See [`docs/repository-split-and-naming.md`](docs/repository-split-and-naming.md).
 
 ## Later work
 
