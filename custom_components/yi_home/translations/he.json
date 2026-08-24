@@ -37,6 +37,9 @@
     "sensor": {
       "runtime_status": {
         "name": "מצב מנגנון"
+      },
+      "frigate_rtsp": {
+        "name": "RTSP ל־Frigate"
       }
     },
     "switch": {
