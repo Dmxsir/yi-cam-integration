@@ -6,6 +6,7 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from .coordinator import YiHomeCoordinator
 from .entity import YiHomeCameraEntity
@@ -143,12 +144,41 @@ class YiHomeFrigateRtspSensor(YiHomeCameraEntity, SensorEntity):
         """Return the complete secret-safe external RTSP URL."""
         return self._rtsp_export.url_for(self._stable_id)
 
+    def _frigate_stream_name(self) -> str:
+        """Return a readable collision-safe Frigate/go2rtc stream alias."""
+        camera = self.camera_data or {}
+        camera_name = str(camera.get("name") or "")
+        base = slugify(camera_name) or f"yi_{self._stable_id[:12]}"
+
+        matches = 0
+        for stable_id in self.coordinator.camera_ids():
+            other = self.coordinator.camera(stable_id) or {}
+            other_name = str(other.get("name") or "")
+            other_base = slugify(other_name) or f"yi_{stable_id[:12]}"
+            if other_base == base:
+                matches += 1
+
+        if matches <= 1:
+            return base
+        return f"{base}_{self._stable_id[:6]}"
+
     @property
     def extra_state_attributes(self) -> dict[str, object]:
-        """Expose only non-secret export metadata."""
+        """Expose only non-secret export metadata and ready-to-copy Frigate YAML."""
+        url = self.native_value
+        stream_name = self._frigate_stream_name()
+        go2rtc_yaml = None
+        if url is not None:
+            go2rtc_yaml = (
+                "go2rtc:\n"
+                "  streams:\n"
+                f"    {stream_name}: {url}"
+            )
         return {
             "external_rtsp_port": self._rtsp_export.port,
             "external_host": self._rtsp_export.host,
             "app_slug": self._rtsp_export.addon_slug,
             "requires_stream_enabled": True,
+            "frigate_stream_name": stream_name,
+            "frigate_go2rtc": go2rtc_yaml,
         }
