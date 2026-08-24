@@ -4,7 +4,7 @@ Date: 2026-08-24
 
 ## Status
 
-Phase 6G is **ACTIVE** with the external Frigate export discovery, generated `go2rtc` UX and runtime ownership behavior validated on the real Home Assistant OS installation.
+Phase 6G is **ACTIVE** with the external Frigate export discovery, generated `go2rtc` UX, runtime ownership, detection and recording behavior validated on the real Home Assistant OS installation.
 
 Validated topology:
 
@@ -15,7 +15,7 @@ YI camera
   -> Home Assistant OS host port mapping
   -> external Frigate host
   -> Frigate go2rtc
-  -> Frigate live view
+  -> Frigate live view / detection / recording
 ```
 
 The external RTSP media path has been validated with H264 video and AAC audio at the transport level. Frigate live-view feeds are confirmed for PTZ-FRONT, pool, warehouse and zforce 800 using the App-owned RTSP path rather than the previous development-laptop PPPP publisher.
@@ -90,6 +90,18 @@ Observed behavior:
 
 This proves Frigate is consuming the App-owned publisher controlled by YI Camera Connect and that no legacy development publisher remains in the active media path.
 
+## Frigate detection and recording validation — PASS
+
+With `ptz-front` running through the generated App-owned RTSP source, a real person/motion pass in front of the camera produced Frigate detection and corresponding recordings.
+
+Observed behavior:
+
+- Frigate detection/event generation works on the App-owned source.
+- Recordings are being created for the camera while using the same generated RTSP path.
+- Live view remained available through the same Frigate stream configuration.
+
+This closes the Phase 6G detection and recording gates without reverting to the legacy publisher or changing the generated upstream URL.
+
 ## Runtime policy
 
 Current behavior remains explicit:
@@ -102,8 +114,8 @@ Current behavior remains explicit:
 ## Phase 6G gate status
 
 1. Stream OFF -> Frigate feed stops; ON -> feed returns: **PASS**.
-2. Frigate detect on the new App-owned source: **PENDING**.
-3. Frigate recording on the new App-owned source: **PENDING**.
+2. Frigate detect on the new App-owned source: **PASS**.
+3. Frigate recording on the new App-owned source: **PASS**.
 4. Audio handling/recording where enabled: **PENDING**.
 5. HA OS external RTSP host/port discovery: **PASS**.
 6. HA OS per-camera ready-to-copy RTSP sensor: **PASS**.
@@ -112,15 +124,12 @@ Current behavior remains explicit:
 
 ## Next validation
 
-Use `ptz-front` for the remaining Frigate media gates:
+Use `ptz-front` for the remaining Frigate media gate:
 
-1. Confirm Frigate detection is enabled for `ptz_front` and generate a real motion/object event in view of the camera.
-2. Verify Frigate produces a detection/event for the App-owned source.
-3. Verify recording is enabled and that a playable recording is created for the same camera/time window.
-4. Verify the recorded/live source includes usable audio where Frigate audio is enabled.
-5. Capture any relevant Frigate camera status/errors if a gate fails; do not change the upstream RTSP URL during validation.
-
-After detect, recording and audio pass, perform the final secret-safe export/diagnostic review before marking Phase 6G complete.
+1. Open a recent Frigate recording/event clip from `ptz_front`.
+2. Verify the clip contains usable audio from the YI camera where Frigate audio is enabled.
+3. If audio is absent, inspect Frigate/go2rtc media information before changing the upstream RTSP URL.
+4. After audio passes, perform the final secret-safe export/diagnostic review before marking Phase 6G complete.
 
 ## Naming
 
