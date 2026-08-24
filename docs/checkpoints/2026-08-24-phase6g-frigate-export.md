@@ -97,6 +97,22 @@ Current behavior remains explicit:
 
 A future release may add an explicit continuous-export policy, but it must not be inferred implicitly from a failed RTSP connection.
 
+## Supervisor export implementation — LANDED, HA OS VALIDATION PENDING
+
+The first user-facing export implementation is now in the Custom Integration code.
+
+Implemented behavior:
+
+- Config Flow persists the real Supervisor App slug from `HassioServiceInfo.slug` for newly-created entries.
+- Existing entries created before that field existed recover the originating App slug from Supervisor discovery, with compatibility fallbacks for the current local-development/public slug names.
+- Integration setup queries Supervisor App info and reads the actual `8554/tcp` host mapping from the App's `network` data. No external port is hard-coded.
+- The LAN host prefers the primary IPv4 address reported by Supervisor network info, with Home Assistant internal-URL/local-IP fallbacks.
+- Runtime state stores this export information separately from the App's internal Supervisor-network RTSP endpoint used by Home Assistant live view.
+- Every YI camera now gets a `Frigate RTSP` sensor whose state is the complete ready-to-copy external URL when the host port is mapped.
+- Existing config entries are migrated in-place with only the secret-safe App slug; no YI credential or media secret is added to Config Entry data.
+
+This implementation must be validated on the current HA OS installation before its gate is marked PASS. In particular, the expected current environment should resolve the mapped port chosen by Supervisor rather than relying on the development value from documentation.
+
 ## Remaining Phase 6G gates
 
 Before Phase 6G is marked COMPLETE:
@@ -105,8 +121,8 @@ Before Phase 6G is marked COMPLETE:
 2. Validate Frigate detect on the new source.
 3. Validate recording on the new source.
 4. Validate audio handling/recording where enabled.
-5. Implement reliable discovery of the App's externally mapped RTSP port.
-6. Expose ready-to-copy per-camera RTSP URLs in YI Camera Connect.
+5. **Validate on HA OS** reliable discovery of the App's externally mapped RTSP port and LAN host.
+6. **Validate on HA OS** ready-to-copy per-camera `Frigate RTSP` sensor values.
 7. Add generated Frigate `go2rtc` export/snippet UX.
 8. Keep exported data secret-safe and avoid exposing cloud UID/DID/account credentials/tokens.
 
