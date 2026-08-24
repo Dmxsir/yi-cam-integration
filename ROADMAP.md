@@ -4,7 +4,7 @@ The target product architecture is documented in [`docs/product-architecture.md`
 The detailed implementation sequence and exit gates are documented in [`docs/development-plan.md`](docs/development-plan.md).
 Home Assistant App packaging requirements are documented in [`docs/home-assistant-app-requirements.md`](docs/home-assistant-app-requirements.md).
 
-Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md).
+Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md).
 
 ## Product target
 
@@ -188,6 +188,12 @@ Selected product UX:
 - YI Camera Connect should also generate a Frigate `go2rtc` YAML snippet for eligible cameras.
 - The mapped host port is installation-specific and must never be hard-coded.
 
+Supervisor port-discovery research:
+
+- Supervisor App info exposes the authoritative App network mapping as `network` / `app.ports`.
+- The higher-level Home Assistant `AddonManager.async_get_addon_info()` wrapper omits that network mapping from its reduced `AddonInfo`, so the Integration will likely need direct Supervisor-client App-info access.
+- The exact installed `aiohasupervisor` model field shape must be inspected before implementation; no attribute name should be guessed.
+
 Remaining Phase 6G gates:
 
 - Validate Stream OFF -> corresponding Frigate feed stops, then ON -> feed returns.
@@ -197,7 +203,7 @@ Remaining Phase 6G gates:
 - Implement generated Frigate `go2rtc` export/snippet UX.
 - Keep all exported/diagnostic data secret-safe.
 
-See [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md).
+See [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md) and the latest handoff checkpoint [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md).
 
 ## Repository split / public naming
 
