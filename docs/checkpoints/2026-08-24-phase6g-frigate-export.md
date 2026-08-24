@@ -4,7 +4,7 @@ Date: 2026-08-24
 
 ## Status
 
-Phase 6G is now **ACTIVE** with a real external Frigate media path proven from the Home Assistant App.
+Phase 6G is **ACTIVE** with the external Frigate export discovery and generated `go2rtc` UX validated on the real Home Assistant OS installation.
 
 Validated topology:
 
@@ -18,73 +18,62 @@ YI camera
   -> Frigate live view
 ```
 
-The external RTSP media path has been validated with H264 video and AAC audio at the transport level. Frigate live-view feeds are currently confirmed for PTZ-FRONT, pool, warehouse and zforce 800 using the App-owned RTSP path rather than the previous development-laptop PPPP publisher.
-
-The current HA OS validation environment maps the App's internal RTSP port to a free host port. This port value is installation-specific and must never be hard-coded as a product assumption.
+The external RTSP media path has been validated with H264 video and AAC audio at the transport level. Frigate live-view feeds are confirmed for PTZ-FRONT, pool, warehouse and zforce 800 using the App-owned RTSP path rather than the previous development-laptop PPPP publisher.
 
 ## Stable stream identity
 
-The media path uses the secret-safe stable camera identity rather than the user-visible camera name.
-
-Conceptually:
+The media path uses the secret-safe stable camera identity rather than the user-visible camera name:
 
 ```text
 rtsp://<HA-host>:<mapped-RTSP-port>/yi_<stable-prefix>
 ```
 
-Renaming a camera must not alter this RTSP path. The already-proven Home Assistant rename behavior therefore also protects Frigate configuration from user-visible camera renames.
+Renaming a camera does not alter this upstream RTSP path. A readable Frigate alias is generated separately from the camera display name.
 
-## Final user experience decision
+## HA OS Supervisor discovery validation — PASS
 
-Users must not be expected to discover a stable ID, inspect Home Assistant registries or manually construct an RTSP URL.
+The Custom Integration now resolves the authoritative external RTSP mapping from Supervisor App info rather than assuming a fixed host port.
 
-Selected UX direction:
-
-### YI RTSP App
-
-The App owns external RTSP publication and exposes/configures the host-facing RTSP port mapping.
-
-Conceptual UI:
+Real HA OS validation result for `ptz-front`:
 
 ```text
-External RTSP access: enabled
-External RTSP port: <mapped host port>
+external_rtsp_port: 28554
+external_host: 10.0.0.16
+app_slug: local_yi_home
+requires_stream_enabled: true
+rtsp://10.0.0.16:28554/yi_e2f22804fecd
 ```
 
-The actual mapped host port is installation-specific. The Integration must resolve the current App/Supervisor mapping rather than assuming a fixed value.
+This proves the current installation's actual `8554/tcp` host mapping is discovered at runtime. `28554` remains installation-specific and is not a product constant.
 
-### YI Camera Connect
+Implementation details:
 
-For every camera, the Integration should expose a ready-to-copy Frigate/RTSP endpoint built from:
+- Config Flow persists the real Supervisor App slug from `HassioServiceInfo.slug` for newly-created entries.
+- Existing entries recover the originating App slug from Supervisor discovery, with compatibility fallbacks for current development/public slug names.
+- Integration setup reads the actual `8554/tcp` host mapping from Supervisor App `network` data.
+- The LAN host prefers the primary IPv4 address reported by Supervisor network info, with Home Assistant internal-URL/local-IP fallbacks.
+- Runtime export data is separate from the App's internal Supervisor-network RTSP endpoint used by Home Assistant live view.
+- Every YI camera exposes a `Frigate RTSP` sensor with a ready-to-copy external URL when the App port is mapped.
+- Existing config entries store only the secret-safe App slug; no YI credentials or media secrets are added.
+- Non-Supervised Home Assistant returns an unavailable export cleanly rather than failing setup.
+
+## Generated Frigate `go2rtc` export — PASS
+
+The `Frigate RTSP` sensor also generates a safe readable Frigate stream alias and a ready-to-copy `go2rtc` YAML snippet.
+
+Validated HA OS result for `ptz-front`:
 
 ```text
-Home Assistant reachable host/IP
-+ current external YI RTSP host port
-+ stable App-owned camera stream path
+frigate_stream_name: ptz_front
+frigate_go2rtc: |-
+  go2rtc:
+    streams:
+      ptz_front: rtsp://10.0.0.16:28554/yi_e2f22804fecd
 ```
 
-The user-facing result should be equivalent to:
+The readable `ptz_front` key is only the local Frigate alias. The upstream path remains stable-ID based. Duplicate readable camera names are disambiguated with a short stable-ID suffix.
 
-```text
-Frigate RTSP
-rtsp://<HA-host>:<port>/yi_<stable-prefix>
-```
-
-The user should never need to know how the path is generated.
-
-## Frigate export helper
-
-YI Camera Connect should also offer a generated Frigate snippet for all eligible cameras, for example:
-
-```yaml
-go2rtc:
-  streams:
-    camera_name: rtsp://<HA-host>:<port>/yi_<stable-prefix>
-```
-
-The generated stream key may use a safe readable camera slug because it is only the local Frigate alias. The upstream RTSP path remains stable-ID based.
-
-This export is a convenience feature only. Frigate remains optional and is not a dependency of either YI RTSP or YI Camera Connect.
+Frigate remains optional and is not a dependency of either YI RTSP or YI Camera Connect.
 
 ## Runtime policy
 
@@ -93,38 +82,30 @@ Current behavior remains explicit:
 - YI RTSP owns the camera runtime.
 - Frigate is only a media consumer.
 - A camera's Stream switch/desired-running state must be enabled for continuous Frigate consumption.
-- Frigate does not currently start a stopped YI runtime on demand.
+- Frigate does not start a stopped YI runtime on demand.
 
-A future release may add an explicit continuous-export policy, but it must not be inferred implicitly from a failed RTSP connection.
+## Phase 6G gate status
 
-## Supervisor export implementation — LANDED, HA OS VALIDATION PENDING
+1. Stream OFF -> Frigate feed stops; ON -> feed returns: **PENDING**.
+2. Frigate detect on the new App-owned source: **PENDING**.
+3. Frigate recording on the new App-owned source: **PENDING**.
+4. Audio handling/recording where enabled: **PENDING**.
+5. HA OS external RTSP host/port discovery: **PASS**.
+6. HA OS per-camera ready-to-copy RTSP sensor: **PASS**.
+7. Generated Frigate `go2rtc` export/snippet UX: **PASS**.
+8. Secret-safe export/diagnostic review: **IN PROGRESS**.
 
-The first user-facing export implementation is now in the Custom Integration code.
+## Next validation
 
-Implemented behavior:
+Use `ptz-front` as the controlled test stream:
 
-- Config Flow persists the real Supervisor App slug from `HassioServiceInfo.slug` for newly-created entries.
-- Existing entries created before that field existed recover the originating App slug from Supervisor discovery, with compatibility fallbacks for the current local-development/public slug names.
-- Integration setup queries Supervisor App info and reads the actual `8554/tcp` host mapping from the App's `network` data. No external port is hard-coded.
-- The LAN host prefers the primary IPv4 address reported by Supervisor network info, with Home Assistant internal-URL/local-IP fallbacks.
-- Runtime state stores this export information separately from the App's internal Supervisor-network RTSP endpoint used by Home Assistant live view.
-- Every YI camera now gets a `Frigate RTSP` sensor whose state is the complete ready-to-copy external URL when the host port is mapped.
-- Existing config entries are migrated in-place with only the secret-safe App slug; no YI credential or media secret is added to Config Entry data.
+1. Confirm Frigate is consuming `ptz_front` from the generated App-owned RTSP URL.
+2. Turn the YI Camera Connect `Stream` switch for `ptz-front` OFF.
+3. Verify the App runtime stops and Frigate loses only that corresponding feed.
+4. Turn the switch ON.
+5. Verify the runtime restarts and the same Frigate stream recovers without changing URL or YAML.
 
-This implementation must be validated on the current HA OS installation before its gate is marked PASS. In particular, the expected current environment should resolve the mapped port chosen by Supervisor rather than relying on the development value from documentation.
-
-## Remaining Phase 6G gates
-
-Before Phase 6G is marked COMPLETE:
-
-1. Prove Stream OFF causes the corresponding new App-owned Frigate feed to stop, and ON restores it, demonstrating no legacy publisher dependency.
-2. Validate Frigate detect on the new source.
-3. Validate recording on the new source.
-4. Validate audio handling/recording where enabled.
-5. **Validate on HA OS** reliable discovery of the App's externally mapped RTSP port and LAN host.
-6. **Validate on HA OS** ready-to-copy per-camera `Frigate RTSP` sensor values.
-7. Add generated Frigate `go2rtc` export/snippet UX.
-8. Keep exported data secret-safe and avoid exposing cloud UID/DID/account credentials/tokens.
+This test demonstrates that Frigate is consuming only the App-owned publisher and that no legacy development publisher remains in the path.
 
 ## Naming
 
