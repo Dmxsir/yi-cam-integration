@@ -3,6 +3,7 @@
 DOMAIN = "yi_home"
 
 CONF_API_TOKEN = "api_token"
+CONF_ADDON_SLUG = "addon_slug"
 CONF_RTSP_PORT = "rtsp_port"
 CONF_REGION = "region"
 CONF_COUNTRY = "country"
@@ -11,6 +12,9 @@ CONF_ACCOUNT = "account"
 DEFAULT_PORT = 8099
 DEFAULT_REGION = "eu"
 DEFAULT_COUNTRY = "IL"
+
+RTSP_CONTAINER_PORT = 8554
+RTSP_CONTAINER_PORT_KEY = f"{RTSP_CONTAINER_PORT}/tcp"
 
 # Internal compatibility profile for the YI Home Android API contract. These
 # fields are deliberately not exposed in the Home Assistant UI.
