@@ -12,6 +12,7 @@ from yarl import URL
 
 from homeassistant.components.hassio import SupervisorError, get_supervisor_client
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import RTSP_CONTAINER_PORT_KEY
@@ -162,6 +163,10 @@ async def async_resolve_rtsp_export(
     api_host: str,
 ) -> YiHomeRtspExport:
     """Resolve the App slug, LAN host and current external RTSP port mapping."""
+    if not is_hassio(hass):
+        _LOGGER.debug("Supervisor unavailable; YI external RTSP export disabled")
+        return YiHomeRtspExport(addon_slug=None, host=None, port=None)
+
     supervisor = get_supervisor_client(hass)
     host = await _async_lan_host(hass, supervisor)
 
@@ -184,8 +189,7 @@ async def async_resolve_rtsp_export(
             addon_info = await supervisor.addons.addon_info(addon_slug)
         except SupervisorError:
             continue
-        payload = addon_info.to_dict()
-        network = payload.get("network")
+        network = addon_info.network
         if not isinstance(network, dict):
             network = {}
         port = _mapped_port(network.get(RTSP_CONTAINER_PORT_KEY))
