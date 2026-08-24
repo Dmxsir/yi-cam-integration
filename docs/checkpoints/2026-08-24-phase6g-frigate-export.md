@@ -4,7 +4,7 @@ Date: 2026-08-24
 
 ## Status
 
-Phase 6G is **ACTIVE** with the external Frigate export discovery and generated `go2rtc` UX validated on the real Home Assistant OS installation.
+Phase 6G is **ACTIVE** with the external Frigate export discovery, generated `go2rtc` UX and runtime ownership behavior validated on the real Home Assistant OS installation.
 
 Validated topology:
 
@@ -75,6 +75,21 @@ The readable `ptz_front` key is only the local Frigate alias. The upstream path 
 
 Frigate remains optional and is not a dependency of either YI RTSP or YI Camera Connect.
 
+## Stream OFF / ON runtime ownership validation — PASS
+
+Controlled validation used `ptz-front` with Frigate already showing live video from the generated App-owned RTSP URL.
+
+Observed behavior:
+
+1. Before the test, Frigate displayed live video for `ptz_front`.
+2. Turning the YI Camera Connect `Stream` switch OFF moved the camera runtime to `STOPPED`.
+3. The corresponding Frigate feed stopped.
+4. Turning the same `Stream` switch ON restarted the App-owned camera runtime.
+5. The same Frigate feed recovered automatically without any Frigate restart and without any URL/YAML change.
+6. Recovery on the current installation took roughly one minute. This is recorded as observed recovery latency, not a gate failure.
+
+This proves Frigate is consuming the App-owned publisher controlled by YI Camera Connect and that no legacy development publisher remains in the active media path.
+
 ## Runtime policy
 
 Current behavior remains explicit:
@@ -86,7 +101,7 @@ Current behavior remains explicit:
 
 ## Phase 6G gate status
 
-1. Stream OFF -> Frigate feed stops; ON -> feed returns: **PENDING**.
+1. Stream OFF -> Frigate feed stops; ON -> feed returns: **PASS**.
 2. Frigate detect on the new App-owned source: **PENDING**.
 3. Frigate recording on the new App-owned source: **PENDING**.
 4. Audio handling/recording where enabled: **PENDING**.
@@ -97,15 +112,15 @@ Current behavior remains explicit:
 
 ## Next validation
 
-Use `ptz-front` as the controlled test stream:
+Use `ptz-front` for the remaining Frigate media gates:
 
-1. Confirm Frigate is consuming `ptz_front` from the generated App-owned RTSP URL.
-2. Turn the YI Camera Connect `Stream` switch for `ptz-front` OFF.
-3. Verify the App runtime stops and Frigate loses only that corresponding feed.
-4. Turn the switch ON.
-5. Verify the runtime restarts and the same Frigate stream recovers without changing URL or YAML.
+1. Confirm Frigate detection is enabled for `ptz_front` and generate a real motion/object event in view of the camera.
+2. Verify Frigate produces a detection/event for the App-owned source.
+3. Verify recording is enabled and that a playable recording is created for the same camera/time window.
+4. Verify the recorded/live source includes usable audio where Frigate audio is enabled.
+5. Capture any relevant Frigate camera status/errors if a gate fails; do not change the upstream RTSP URL during validation.
 
-This test demonstrates that Frigate is consuming only the App-owned publisher and that no legacy development publisher remains in the path.
+After detect, recording and audio pass, perform the final secret-safe export/diagnostic review before marking Phase 6G complete.
 
 ## Naming
 
