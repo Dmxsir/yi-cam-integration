@@ -11,7 +11,7 @@ The current `yi-cam-integration` repository remains the development monorepo unt
 
 ## Repository A — Home Assistant App
 
-Working product/display name: **YI RTSP**.
+Selected product/display name: **YI RTSP**.
 
 Suggested repository name:
 
@@ -35,12 +35,12 @@ The protocol name is **RTSP** (not `RSTP`).
 
 ## Repository B — Home Assistant Custom Integration
 
-The Integration should have a visibly different Home Assistant name from the App.
+Selected product/display name: **YI Camera Connect**.
 
 Suggested repository name:
 
 ```text
-yi-camera-integration
+yi-camera-connect
 ```
 
 Responsibilities remain:
@@ -65,22 +65,26 @@ Public names should avoid ambiguity with existing community/official naming:
 - Avoid **YI Home** as the public project name because it is strongly associated with YI's official application/company branding.
 - The App and Integration should be easy to distinguish in Home Assistant.
 
-Current naming state:
+Final naming decision:
 
 ```text
-App:         YI RTSP                 [selected working name]
-Integration: TBD                     [separate name required]
+App:          YI RTSP
+Integration:  YI Camera Connect
 ```
 
-Integration name candidates:
+The current development code may continue using internal `yi_home` identifiers until the explicit migration milestone. Renaming Home Assistant domains/slugs is a compatibility-sensitive change and must be handled as a migration rather than an incidental refactor.
+
+Planned public identifiers at the repository/package split milestone:
 
 ```text
-YI Camera Bridge    <- current recommendation
-YI Camera Connect
-YI Camera Link
+App repository:          yi-rtsp-app
+App display name:        YI RTSP
+
+Integration repository:  yi-camera-connect
+Integration display name:YI Camera Connect
 ```
 
-The final Integration display name should be selected before repository extraction and public packaging.
+The exact final Home Assistant App slug and Custom Integration domain must be selected and migrated together with registry/config-entry compatibility handling before public release.
 
 ## Cross-repository contract
 
@@ -89,7 +93,7 @@ The two repositories must communicate only through the stable, versioned App API
 Release compatibility should be explicit, for example:
 
 ```text
-Integration 1.x -> requires YI RTSP App >= 1.x
+YI Camera Connect 1.x -> requires YI RTSP App >= 1.x
 ```
 
 If the App API changes incompatibly, the API version must change or the Integration must provide an explicit compatibility check rather than failing indirectly.
@@ -100,12 +104,12 @@ If the App API changes incompatibly, the API version must change or the Integrat
 YI RTSP App repository
   -> Home Assistant App repository/package
 
-YI Camera Integration repository
+YI Camera Connect repository
   -> HACS / custom_components distribution
 
 YI RTSP App
   <-> versioned authenticated local API
-YI Camera Integration
+YI Camera Connect
 
 Frigate
   -> optional consumer of YI RTSP App media endpoints
