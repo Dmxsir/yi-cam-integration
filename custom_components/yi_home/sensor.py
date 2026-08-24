@@ -9,6 +9,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import YiHomeCoordinator
 from .entity import YiHomeCameraEntity
+from .rtsp_export import YiHomeRtspExport
 
 
 _FAILURE_STAGE_BY_EXIT_CODE = {
@@ -57,8 +58,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up camera runtime sensors, including cameras discovered later."""
+    """Set up camera sensors, including cameras discovered later."""
     coordinator: YiHomeCoordinator = entry.runtime_data.coordinator
+    rtsp_export: YiHomeRtspExport = entry.runtime_data.rtsp_export
     known_ids: set[str] = set()
 
     @callback
@@ -67,10 +69,13 @@ async def async_setup_entry(
         if not new_ids:
             return
         known_ids.update(new_ids)
-        async_add_entities(
-            YiHomeRuntimeSensor(coordinator, stable_id)
-            for stable_id in sorted(new_ids)
-        )
+        entities: list[SensorEntity] = []
+        for stable_id in sorted(new_ids):
+            entities.append(YiHomeRuntimeSensor(coordinator, stable_id))
+            entities.append(
+                YiHomeFrigateRtspSensor(coordinator, stable_id, rtsp_export)
+            )
+        async_add_entities(entities)
 
     async_add_new_entities()
     entry.async_on_unload(coordinator.async_add_listener(async_add_new_entities))
@@ -109,4 +114,41 @@ class YiHomeRuntimeSensor(YiHomeCameraEntity, SensorEntity):
             "publisher_attached": runtime.get("media_publisher_attached"),
             "published_bytes": runtime.get("published_bytes"),
             "publisher_error": runtime.get("publisher_error"),
+        }
+
+
+class YiHomeFrigateRtspSensor(YiHomeCameraEntity, SensorEntity):
+    """Ready-to-copy LAN RTSP endpoint for optional Frigate consumption."""
+
+    _attr_translation_key = "frigate_rtsp"
+    _attr_icon = "mdi:video-network-outline"
+
+    def __init__(
+        self,
+        coordinator: YiHomeCoordinator,
+        stable_id: str,
+        rtsp_export: YiHomeRtspExport,
+    ) -> None:
+        super().__init__(coordinator, stable_id)
+        self._attr_unique_id = f"{stable_id}_frigate_rtsp"
+        self._rtsp_export = rtsp_export
+
+    @property
+    def available(self) -> bool:
+        """Only expose a usable value while the external App port is mapped."""
+        return super().available and self._rtsp_export.available
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the complete secret-safe external RTSP URL."""
+        return self._rtsp_export.url_for(self._stable_id)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Expose only non-secret export metadata."""
+        return {
+            "external_rtsp_port": self._rtsp_export.port,
+            "external_host": self._rtsp_export.host,
+            "app_slug": self._rtsp_export.addon_slug,
+            "requires_stream_enabled": True,
         }
