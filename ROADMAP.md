@@ -4,7 +4,7 @@ The target product architecture is documented in [`docs/product-architecture.md`
 The detailed implementation sequence and exit gates are documented in [`docs/development-plan.md`](docs/development-plan.md).
 Home Assistant App packaging requirements are documented in [`docs/home-assistant-app-requirements.md`](docs/home-assistant-app-requirements.md).
 
-Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md).
+Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md).
 
 ## Product target
 
@@ -178,32 +178,34 @@ Proven so far:
 - Frigate live-view feeds are confirmed through the new App path for PTZ-FRONT, pool, warehouse and zforce 800.
 - The old development-laptop PPPP publisher is no longer required for those migrated streams.
 - Frigate remains optional and separate from the core App/Integration lifecycle.
+- **Supervisor external RTSP port + LAN-host discovery: HA OS PASS.** The current installation dynamically resolved `local_yi_home`, host `10.0.0.16`, and mapped port `28554` for container `8554/tcp`.
+- **Ready-to-copy per-camera Frigate RTSP URL: HA OS PASS.** `ptz-front` resolved to `rtsp://10.0.0.16:28554/yi_e2f22804fecd`.
 
 Selected product UX:
 
 - Users must not discover stable IDs or manually construct RTSP URLs.
 - YI RTSP owns/configures external RTSP publication.
 - YI Camera Connect resolves the actual HA host plus the App's mapped external RTSP port.
-- Each camera should expose a ready-to-copy Frigate RTSP URL.
-- YI Camera Connect should also generate a Frigate `go2rtc` YAML snippet for eligible cameras.
+- Each camera exposes a ready-to-copy Frigate RTSP URL.
+- The same sensor now generates a Frigate `go2rtc` YAML snippet and a readable collision-safe stream alias.
 - The mapped host port is installation-specific and must never be hard-coded.
 
-Supervisor port-discovery research:
+Supervisor port-discovery implementation:
 
-- Supervisor App info exposes the authoritative App network mapping as `network` / `app.ports`.
-- The higher-level Home Assistant `AddonManager.async_get_addon_info()` wrapper omits that network mapping from its reduced `AddonInfo`, so the Integration will likely need direct Supervisor-client App-info access.
-- The exact installed `aiohasupervisor` model field shape must be inspected before implementation; no attribute name should be guessed.
+- Direct Supervisor App info is used rather than the reduced higher-level AddonManager wrapper.
+- The verified `aiohasupervisor` installed-App model exposes `network: dict[str, int | None] | None`.
+- The Integration reads `addon_info.network` directly and extracts the host mapping for `8554/tcp`.
+- Non-Supervisor installs exit cleanly with the export unavailable rather than raising or assuming a port.
+- App options/credentials are not materialized or logged for port discovery.
 
 Remaining Phase 6G gates:
 
+- Validate the generated per-camera `frigate_stream_name` and `frigate_go2rtc` attributes on HA OS.
 - Validate Stream OFF -> corresponding Frigate feed stops, then ON -> feed returns.
 - Validate Frigate detection, recording and audio on the App-owned source.
-- Implement reliable Supervisor/App external RTSP port discovery.
-- Expose ready-to-copy per-camera RTSP URLs.
-- Implement generated Frigate `go2rtc` export/snippet UX.
-- Keep all exported/diagnostic data secret-safe.
+- Perform final secret-redaction/export review.
 
-See [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md) and the latest handoff checkpoint [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-handoff.md).
+See [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md).
 
 ## Repository split / public naming
 
