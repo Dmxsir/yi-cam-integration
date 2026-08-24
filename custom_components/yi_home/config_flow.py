@@ -26,6 +26,7 @@ from .const import (
     CLIENT_DEVICE_MODEL,
     CLIENT_LANGUAGE,
     CONF_ACCOUNT,
+    CONF_ADDON_SLUG,
     CONF_API_TOKEN,
     CONF_COUNTRY,
     CONF_REGION,
@@ -66,6 +67,8 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_PORT: int(self._discovery[CONF_PORT]),
             CONF_API_TOKEN: self._discovery[CONF_API_TOKEN],
         }
+        if CONF_ADDON_SLUG in self._discovery:
+            data[CONF_ADDON_SLUG] = str(self._discovery[CONF_ADDON_SLUG])
         if CONF_RTSP_PORT in self._discovery:
             data[CONF_RTSP_PORT] = int(self._discovery[CONF_RTSP_PORT])
         if region is not None:
@@ -99,6 +102,12 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         if any(not config.get(key) for key in required) or config.get("api_version") != "v1":
             _LOGGER.warning("YI Home Hass.io discovery payload is incomplete or has an unsupported API version")
             return self.async_abort(reason="invalid_discovery")
+
+        # Preserve the actual Supervisor slug (`local_yi_home` during local
+        # development, later the public App slug) so external RTSP port mapping
+        # can be resolved without guessing.
+        if discovery_info.slug:
+            config[CONF_ADDON_SLUG] = discovery_info.slug
 
         self._discovery = config
         self._app_name = discovery_info.name or "YI Home"
