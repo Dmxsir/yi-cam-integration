@@ -4,7 +4,7 @@ The target product architecture is documented in [`docs/product-architecture.md`
 The detailed implementation sequence and exit gates are documented in [`docs/development-plan.md`](docs/development-plan.md).
 Home Assistant App packaging requirements are documented in [`docs/home-assistant-app-requirements.md`](docs/home-assistant-app-requirements.md).
 
-Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md).
+Latest checkpoint: [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md).
 
 ## Product target
 
@@ -24,6 +24,7 @@ Current internal `yi_home` identifiers remain unchanged until the explicit compa
 - Phase 6A — Generic account discovery by secret-safe identity: **COMPLETE**.
 - Phase 6B — Generic runtime/capability cache: **COMPLETE**.
 - Phase 6C — Long-running backend, lifecycle, managed go2rtc, authoritative availability and persistence: **COMPLETE**.
+- Phase 6G — Frigate integration/export: **COMPLETE**.
 
 ## Phase 6D — Home Assistant App/Add-on packaging — ACTIVE
 
@@ -169,43 +170,49 @@ Install YI RTSP
 
 No UID/DID/model/TNP/RTSP/YAML required from the user for Home Assistant operation.
 
-## Phase 6G — Frigate integration/export — ACTIVE
+## Phase 6G — Frigate integration/export — COMPLETE
 
-Proven so far:
+Validated final topology:
 
-- Stable App-owned RTSP endpoints are reachable from an external Frigate host through the HA OS host-port mapping.
-- External Frigate ffprobe sees H264 video and AAC audio from the App-owned RTSP path.
-- Frigate live-view feeds are confirmed through the new App path for PTZ-FRONT, pool, warehouse and zforce 800.
-- The old development-laptop PPPP publisher is no longer required for those migrated streams.
+```text
+YI camera
+  -> YI RTSP App runtime
+  -> App-owned go2rtc / RTSP publication
+  -> HA OS host-port mapping
+  -> external Frigate
+  -> Frigate go2rtc
+  -> live / detect / record / audio
+```
+
+Completed gates:
+
+- Stable App-owned RTSP endpoints are reachable from the external Frigate host through HA OS host-port mapping.
+- H264 video + AAC audio are present on the App-owned RTSP transport.
+- Supervisor external RTSP mapping is discovered dynamically; the tested installation resolved `local_yi_home`, `10.0.0.16`, and host port `28554` for container `8554/tcp`.
+- Every camera exposes a ready-to-copy Frigate RTSP URL based on a stable secret-safe stream path.
+- A readable collision-safe Frigate alias and generated `go2rtc` snippet are exposed by the Integration.
+- Generated Frigate `go2rtc` export includes an Opus live-audio producer while preserving AAC on the original RTSP transport.
+- Stream OFF moves runtime to `STOPPED` and removes the corresponding Frigate feed; Stream ON restores the same feed automatically without Frigate restart or YAML changes.
+- Frigate detection/events work on the App-owned source.
+- Frigate recordings work on the App-owned source.
+- Live/recorded audio is validated across the tested migrated YI cameras.
+- Secret-safe export review passed: Frigate-facing state does not expose YI account credentials, cloud UID/DID values, bearer tokens or media credentials.
+- The legacy development-laptop publisher is not required for the migrated Frigate streams.
 - Frigate remains optional and separate from the core App/Integration lifecycle.
-- **Supervisor external RTSP port + LAN-host discovery: HA OS PASS.** The current installation dynamically resolved `local_yi_home`, host `10.0.0.16`, and mapped port `28554` for container `8554/tcp`.
-- **Ready-to-copy per-camera Frigate RTSP URL: HA OS PASS.** `ptz-front` resolved to `rtsp://10.0.0.16:28554/yi_e2f22804fecd`.
 
-Selected product UX:
+Selected Frigate export shape:
 
-- Users must not discover stable IDs or manually construct RTSP URLs.
-- YI RTSP owns/configures external RTSP publication.
-- YI Camera Connect resolves the actual HA host plus the App's mapped external RTSP port.
-- Each camera exposes a ready-to-copy Frigate RTSP URL.
-- The same sensor now generates a Frigate `go2rtc` YAML snippet and a readable collision-safe stream alias.
-- The mapped host port is installation-specific and must never be hard-coded.
+```yaml
+go2rtc:
+  streams:
+    camera_alias:
+      - rtsp://<HA-host>:<mapped-port>/yi_<stable-prefix>
+      - "ffmpeg:camera_alias#audio=opus"
+```
 
-Supervisor port-discovery implementation:
+For recording, the validated Frigate pattern uses `record` on the restream input with `preset-record-generic-audio-copy` so the source AAC track is preserved.
 
-- Direct Supervisor App info is used rather than the reduced higher-level AddonManager wrapper.
-- The verified `aiohasupervisor` installed-App model exposes `network: dict[str, int | None] | None`.
-- The Integration reads `addon_info.network` directly and extracts the host mapping for `8554/tcp`.
-- Non-Supervisor installs exit cleanly with the export unavailable rather than raising or assuming a port.
-- App options/credentials are not materialized or logged for port discovery.
-
-Remaining Phase 6G gates:
-
-- Validate the generated per-camera `frigate_stream_name` and `frigate_go2rtc` attributes on HA OS.
-- Validate Stream OFF -> corresponding Frigate feed stops, then ON -> feed returns.
-- Validate Frigate detection, recording and audio on the App-owned source.
-- Perform final secret-redaction/export review.
-
-See [`docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md`](docs/checkpoints/2026-08-24-phase6g-supervisor-port-discovery-pass.md).
+See [`docs/checkpoints/2026-08-24-phase6g-frigate-export.md`](docs/checkpoints/2026-08-24-phase6g-frigate-export.md).
 
 ## Repository split / public naming
 
@@ -226,3 +233,4 @@ Before public distribution the monorepo will be split into independent App and I
 - Motion/event integration.
 - Reduce/eliminate QEMU where practical.
 - Packaging/release automation and HACS/App repository distribution.
+- Optional Frigate recovery-latency tuning.
