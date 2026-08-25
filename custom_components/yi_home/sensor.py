@@ -172,7 +172,9 @@ class YiHomeFrigateRtspSensor(YiHomeCameraEntity, SensorEntity):
             go2rtc_yaml = (
                 "go2rtc:\n"
                 "  streams:\n"
-                f"    {stream_name}: {url}"
+                f"    {stream_name}:\n"
+                f"      - {url}\n"
+                f'      - "ffmpeg:{stream_name}#audio=opus"'
             )
         return {
             "external_rtsp_port": self._rtsp_export.port,
