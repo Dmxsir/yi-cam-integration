@@ -25,6 +25,7 @@ from pathlib import Path
 
 SAFE_PREFIX = b"[phase3g-relay] ffmpeg_state="
 PTZ_VIDEO_ONLY_STABLE_ID = b"e2f22804fecd"
+MAX_ANCESTOR_SCAN = 8
 
 
 def _is_yi_live_mux(args: list[str]) -> bool:
@@ -38,12 +39,12 @@ def _is_yi_live_mux(args: list[str]) -> bool:
     )
 
 
-def _parent_is_ptz_runtime() -> bool:
-    """Identify only the direct stable-id relay parent; never log cmdline data."""
+def _cmdline_is_ptz_runtime(pid: int) -> bool:
+    """Check one process for the PTZ stable-id without logging cmdline data."""
     try:
         values = [
             value
-            for value in Path(f"/proc/{os.getppid()}/cmdline").read_bytes().split(b"\0")
+            for value in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
             if value
         ]
     except OSError:
@@ -51,6 +52,36 @@ def _parent_is_ptz_runtime() -> bool:
     for index, value in enumerate(values[:-1]):
         if value == b"--stable-id" and values[index + 1] == PTZ_VIDEO_ONLY_STABLE_ID:
             return True
+    return False
+
+
+def _parent_pid(pid: int) -> int | None:
+    """Return one Linux parent PID from /proc without exposing process data."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        # comm is parenthesized and may contain spaces, so split only after the
+        # final ') '. Field 4 (ppid) is then item 1 in the remaining tail.
+        tail = raw.rsplit(") ", 1)[1].split()
+        parent = int(tail[1])
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return None
+    return parent if parent > 0 and parent != pid else None
+
+
+def _ancestor_is_ptz_runtime() -> bool:
+    """Find the stable relay even when an exec/helper sits between it and us."""
+    pid = os.getppid()
+    seen: set[int] = set()
+    for _ in range(MAX_ANCESTOR_SCAN):
+        if pid <= 1 or pid in seen:
+            return False
+        seen.add(pid)
+        if _cmdline_is_ptz_runtime(pid):
+            return True
+        parent = _parent_pid(pid)
+        if parent is None:
+            return False
+        pid = parent
     return False
 
 
@@ -161,7 +192,7 @@ def main() -> int:
         _exec_real(real_ffmpeg, args)
         return 127
 
-    video_only = _parent_is_ptz_runtime()
+    video_only = _ancestor_is_ptz_runtime()
     diagnostic_args = _with_info_loglevel(args)
     if video_only:
         diagnostic_args = _with_video_only_output(diagnostic_args)
