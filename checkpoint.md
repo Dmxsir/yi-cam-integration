@@ -58,7 +58,7 @@ The App owns camera runtime lifecycle and go2rtc publication. Frigate is only a 
 
 Phase 6G is complete and must not be reopened absent a real regression.
 
-Stable source:
+Stable Frigate source:
 
 ```text
 rtsp://<HA-host>:<mapped-port>/yi_<stable-prefix>
@@ -70,7 +70,7 @@ Known PTZ example:
 rtsp://10.0.0.16:28554/yi_e2f22804fecd
 ```
 
-Mapped RTSP host port is Supervisor-discovered, not hardcoded.
+The mapped RTSP host port is discovered through Supervisor; it is not hardcoded in production.
 
 Previously validated:
 
@@ -84,7 +84,7 @@ Previously validated:
 
 Do **not** start Phase 6E while the restart/stall issue below is unresolved.
 
-## Relevant runtime IDs
+## Relevant camera runtime IDs
 
 ```text
 e2f22804fecd = PTZ front camera
@@ -92,11 +92,11 @@ e2f22804fecd = PTZ front camera
 6a046d860b2d = separate unstable camera
 ```
 
-Do not invent other friendly-name mappings without evidence.
+Do not invent other stable-ID/friendly-name mappings without evidence.
 
 ## TNP/PPPP two-stage startup — proven and deployed
 
-Official capture:
+Official capture proves:
 
 ```text
 T+~3 ms      9029 no.2  use-count=1
@@ -116,13 +116,13 @@ Commands:
 767  = STOP_LIVE
 ```
 
-Implementation:
+Implementation commit:
 
 ```text
 1d269056f6a6d86157b3ba59e1cdbb3b9bae3151
 ```
 
-Worker staging helper:
+Worker build/staging helper:
 
 ```text
 7c1e6cee8fa517cf4931a951e39200f8fffffb7e
@@ -134,9 +134,9 @@ Validated worker SHA-256:
 67d12d6e56746a67d306a0ebff8ef07ee02aaef51954b38fe0e0383c5229fa5a
 ```
 
-Do not add blind extra `9029` requests.
+Do not add blind extra `9029` requests. Current two-stage pattern is capture-proven.
 
-## Native worker exits
+## Native worker exit meanings
 
 ```text
 40 = PPPP_Connect negative
@@ -148,13 +148,13 @@ Do not add blind extra `9029` requests.
 73 = refresh thread creation failure
 ```
 
-Observed negative connection value:
+Observed connection value:
 
 ```text
 0xFFFFF445 = signed -3003
 ```
 
-Its semantic meaning is unproven.
+Its semantic meaning is unproven. Do not label it timeout/already-connected/etc.
 
 ## Supervisor stall / exit codes
 
@@ -171,9 +171,9 @@ Its semantic meaning is unproven.
 105 = relay_processing
 ```
 
-Startup timeout is 45 s; post-start stall timeout 12 s. Do not increase as workaround.
+Startup timeout is 45 s; post-start stall timeout 12 s. Do not increase them as a workaround.
 
-## App staging rule
+## App build/staging rule
 
 `yi_home/Dockerfile`:
 
@@ -184,10 +184,10 @@ COPY run.sh /run.sh
 
 Therefore:
 
-- root Python change => `python3 tools/prepare_ha_app_context.py`, then copy staged file into `/addons/yi_home/rootfs/...`, then rebuild App;
+- root Python change => run `python3 tools/prepare_ha_app_context.py`, then copy staged file(s) under `/addons/yi_home/rootfs/...`, then rebuild App;
 - `yi_home/run.sh` can be copied directly and needs rebuild;
-- native C change => compile/stage worker;
-- never assume a root Python change is already inside the App context.
+- C change => compile/stage worker;
+- never assume root-level Python is already inside the App context.
 
 ## Graceful shutdown
 
@@ -197,18 +197,18 @@ Commit:
 c97e5555bdd26ffd72c7df1583d8512ccbef5c15
 ```
 
-Supervisor first SIGTERMs relay parent so relay can send STOP/BREAK/FORCECLOSE and close PPPP cleanly. Process-group TERM/KILL is fallback after grace timeout.
+Supervisor first SIGTERMs relay parent so it can send STOP/BREAK/FORCECLOSE and close PPPP cleanly. Process-group TERM/KILL is fallback only after grace timeout.
 
-PTZ usually exits gracefully; `6a046d860b2d` sometimes requires process-group fallback.
+PTZ usually exits gracefully. `6a046d860b2d` sometimes still requires process-group fallback.
 
 ## Safe diagnostics policy
 
 `yi_home/run.sh` mirrors only fixed allowlisted prefixes from `/data/runtime/*.log`.
 
-Allowed evidence:
+Allowed evidence includes:
 
 - PPPP return codes
-- TNP response metadata/auth result
+- TNP response version/command/auth result
 - native channel counters
 - fixed relay/supervisor stages
 - H264 NAL type/count/size metadata
@@ -225,9 +225,11 @@ channel2 = I-frame video records
 channel3 = P-frame video records
 ```
 
-## Historical diagnostics
+## Key historical diagnostics
 
-### Minimal FFmpeg probing
+### Minimal probing
+
+Commit:
 
 ```text
 328fd031caaee8a13b4b74bc2234f57cb9895874
@@ -236,6 +238,8 @@ channel3 = P-frame video records
 Live probing reduced to video `probesize=4096/analyzeduration=0/fpsprobesize=0`, audio `probesize=1024/analyzeduration=0`. PTZ still stalled. Large probe windows are not root cause.
 
 ### First H264 NAL diagnostic
+
+Commit:
 
 ```text
 b3fa9d06c9e976447f5f3570d3915f14331c953d
@@ -248,9 +252,9 @@ first_video_nal_types=7,8,5
 SPS=1 PPS=1 IDR=1
 ```
 
-Missing SPS/PPS/IDR is not primary Class-A cause.
+Missing SPS/PPS/IDR is not primary startup cause.
 
-### First-five H264 record-shape diagnostic
+### First-five-record H264 shape diagnostic
 
 ```text
 d412e35ef0134c4b83e312aca425e6dde7189b70
@@ -258,7 +262,7 @@ d412e35ef0134c4b83e312aca425e6dde7189b70
 5fc8df9d764903f7ac3d4aea18a6044123f18a00
 ```
 
-Successful and failed sessions can begin with the same several P records (`NAL 1`) before an I record (`7,8,5`). Stable cameras can also do this. Do not inject AUD without new evidence.
+Successful and failed sessions can begin with the same general pattern: several P records (`NAL 1`) before I record (`7,8,5`). Stable cameras can also do this. Do not inject AUD without new evidence.
 
 ## FFmpeg state diagnostics — decisive evidence
 
@@ -282,9 +286,9 @@ ffmpeg_state=output_mpegts_ready
 ffmpeg_state=stream_mapping_ready
 ```
 
-Then remains silent for 45 s. On SIGTERM the first MPEG-TS chunk appears immediately and mux/worker can exit cleanly.
+Then remains silent for 45 s. On SIGTERM, first MPEG-TS chunk appears immediately and mux/worker can exit cleanly.
 
-Therefore Class A is **after both inputs are opened/identified and MPEG-TS output/mapping are ready, but before first output packet is emitted**.
+Therefore Class A is **after both inputs are opened and identified and after MPEG-TS output/mapping are ready, but before the first output packet is emitted**.
 
 Strongly ruled out for Class A:
 
@@ -296,7 +300,7 @@ Strongly ruled out for Class A:
 - failure to create MPEG-TS output
 - failure to map streams
 
-Leading area remains FFmpeg packet scheduling / A-V interleave / timestamp behavior.
+Leading area: FFmpeg packet scheduling / A-V interleave / timestamp behavior.
 
 ## PTZ independent failure classes
 
@@ -313,23 +317,14 @@ all FFmpeg state milestones reached
 45 s zero TS
 exit 74
 SIGTERM
-first TS appears immediately
+first TS immediately appears
 ```
 
 Target of current A/B experiment.
 
 ### Class B — no initial I-frame
 
-Observed:
-
-```text
-channel1_records=28
-channel2_records=0
-channel3_records=37
-video_frames=0
-```
-
-Exclude from Class-A A/B judgment.
+Observed examples include generations with channel1/channel3 activity but `channel2_records=0`, so mux never has a decodable I-frame start. Exclude those from Class-A A/B judgment.
 
 ### Class C — native worker exit 60
 
@@ -338,7 +333,7 @@ native_worker_exit=60
 relay_exit_rc=81
 ```
 
-Early PPPP/TNP failure; separate from Class A. Exclude from A/B judgment.
+Early PPPP/TNP failure; separate from FFmpeg Class A. Exclude from A/B judgment.
 
 ### Class D — post-start native header starvation
 
@@ -352,13 +347,14 @@ Observed:
 - post-start 100 native-header wait
 - 102 audio-pipe write stall
 - worker 60
+- PPPP connect negative / worker 40
 - occasional process-group TERM/KILL
 
 Do not treat all `6a` failures as PTZ root cause.
 
 ## Current temporary A/B — PTZ MPEG-TS video-only output
 
-Goal: test whether mapped AAC/A-V interleave causes Class A while AAC input remains consumed so the relay audio writer cannot block merely because of the test.
+Goal: test whether mapped AAC/A-V interleave is responsible for Class A while keeping AAC input consumed so the relay's audio writer does not block.
 
 ### Experiment behavior when activated
 
@@ -366,145 +362,118 @@ For PTZ live only:
 
 - H264 input unchanged;
 - AAC input remains open and consumed;
-- remove output `-map 1:a:0` only;
+- remove only output `-map 1:a:0`;
 - remove `-bsf:a` because audio is not mapped;
 - H264 stream-copy, no transcoding;
-- MPEG-TS output becomes video-only;
+- MPEG-TS output video-only;
 - PPPP/TNP, worker, two-stage 9029/768, reorder and watchdogs unchanged.
 
-Activation marker:
+Safe activation markers:
 
 ```text
+ffmpeg_state=ptz_detection=stable_id_env
 ffmpeg_state=ptz_video_only_ab_active
 ```
 
-Shutdown summary must report:
+Shutdown summary for a valid activated PTZ generation must include:
 
 ```text
 video_only=1
 ```
 
-Other cameras remain `video_only=0`.
+Other cameras must remain `ptz_detection=none` and `video_only=0`.
 
-### A/B detection history
+### Failed detection attempts — do not interpret as A/B results
 
 ```text
 8db7d48162fee17b89e4b78bc247f7004a066ad6  direct-parent detection
-0fecfe106b5f06c17901e3eb4658aeb8927d3ed6  bounded ancestor cmdline scan
-3f34ee8d657127aa9e7fccaa4e96c9db6ef45899  self stderr runtime-log detection
-198f5154d598678ecd5d15a6d4e3be431397c830  hardened self+ancestor stderr/cmdline detection + safe detector marker
+0fecfe106b5f06c17901e3eb4658aeb8927d3ed6  ancestor scan
+3f34ee8d657127aa9e7fccaa4e96c9db6ef45899  self-stderr detection
+198f5154d598678ecd5d15a6d4e3be431397c830  diagnostic detector-source logging
 ```
 
-The first three deployed detection approaches did **not** activate the A/B in HA. Every valid PTZ FFmpeg shutdown summary stayed:
+HA logs proved all of these process/FD-derived methods failed to identify PTZ in the actual App runtime. In the 15:18 run, every live mux including PTZ explicitly logged:
 
 ```text
-video_only=0
-```
-
-and no `ptz_video_only_ab_active` appeared. These runs are therefore **not A/B results**; they only reconfirm the normal A/V Class-A failure.
-
-### Latest deployed evidence — 15:05 local, 2026-08-26
-
-The App rebuilt/restarted successfully and normal FFmpeg diagnostics were active.
-
-PTZ first produced a separate Class-C generation:
-
-```text
-native_worker_exit=60
-relay_exit_rc=81
-```
-
-Then a valid Class-A generation showed:
-
-```text
-TNP auth PASS
-media readers STARTED
-first_video_nal_types=7,8,5
-all FFmpeg input/output/mapping milestones
-startup_stall exit 74
-channel1_records=59
-channel2_records=1
-channel3_records=61
-first TS only after SIGTERM
-video_only=0
-```
-
-A later valid Class-A generation again showed all milestones, exit 74, first TS on SIGTERM and `video_only=0`.
-
-Therefore `3f34ee8d...` self-fd2 detection also did **not** activate in the actual HA process topology.
-
-The same log again showed `6a046d860b2d` independent issues including channel2=0 startup and post-start code100.
-
-## Current source — hardened PTZ detector
-
-Commit:
-
-```text
-198f5154d598678ecd5d15a6d4e3be431397c830
-```
-
-Changed file:
-
-```text
-yi_ffmpeg_state_wrapper.py
-```
-
-The wrapper now performs bounded secret-safe detection in this order:
-
-1. its own stderr FD target basename;
-2. each ancestor's stderr FD target basename, up to 8 ancestors;
-3. each ancestor's exact `--stable-id e2f22804fecd` pair as fallback.
-
-Runtime log basename matching tolerates Linux ` (deleted)` suffix.
-
-It exposes one fixed marker only:
-
-```text
-ffmpeg_state=ptz_detection=self_stderr
-ffmpeg_state=ptz_detection=ancestor_stderr
-ffmpeg_state=ptz_detection=ancestor_cmdline
 ffmpeg_state=ptz_detection=none
 ```
 
-No path, PID or command-line contents are logged.
+The PTZ also had one Class-B generation (`channel2_records=0`) followed by another generation that reached `mpegts_mux=STARTED`, all FFmpeg A/V readiness markers, but still had `ptz_detection=none`. Therefore no uploaded run before the current source change is a valid video-only A/B result.
 
-Any detector other than `none` activates video-only and also emits:
+## Current deterministic activation source — stable-id environment
+
+New code commits:
 
 ```text
-ffmpeg_state=ptz_video_only_ab_active
+8e11d5b2cd08753d728ac4d8f8078424dc43d095  wrapper reads stable-id environment first
+3b0b5225ae442cf15ce64fb7b78840859c8716a1  stable relay exports stable-id environment
 ```
 
-This commit is diagnostic plus the already-approved PTZ-only A/B behavior; it does not change TNP, worker, codecs, timeouts or other cameras.
+Changed files:
 
-### Interpretation
+```text
+yi_ffmpeg_state_wrapper.py
+yi_native_av_relay_stable.py
+```
 
-If valid PTZ `video_only=1` generations produce TS promptly/reliably, evidence points to mapped AAC, A/V timestamp relationship or A/V interleave/output scheduling.
+Mechanism:
 
-If valid PTZ `video_only=1` generations still reach video output readiness then stall until EOF, mapped AAC is not sufficient; next focus is H264 timing/SETTS/video mux scheduling.
+1. `yi_native_av_relay_stable.py` already receives the exact non-secret `--stable-id` for its camera.
+2. Immediately after validation it exports:
 
-If detector reports `none`, do not interpret A/B behavior. Use that marker to choose the next deterministic targeting mechanism rather than guessing.
+```text
+YI_FFMPEG_STABLE_ID=<stable_id>
+```
 
-Exclude channel2=0 and worker60 generations from the A/B verdict.
+3. FFmpeg is spawned from that same per-camera process and inherits the environment normally.
+4. `yi_ffmpeg_state_wrapper.py` now checks this variable **before** any `/proc` or stderr fallback.
+5. Exact value `e2f22804fecd` yields detector label `stable_id_env` and activates the existing PTZ-only video-output mapping.
+6. Other stable IDs do not activate the experiment.
+
+This uses only a stable ID already exposed in safe diagnostics; no credentials or device secrets are propagated or logged.
+
+The older `/proc`/stderr detectors remain only as fallback diagnostics and are no longer required for correct activation.
+
+## Interpretation criteria after activation
+
+If valid PTZ `video_only=1` generations now produce TS promptly/reliably, strong evidence points to mapped AAC, A/V timestamp relationship or A/V interleave/output scheduling.
+
+If valid `video_only=1` generations still reach video/output readiness and stall until EOF, mapped AAC is not sufficient to explain Class A; next focus is H264 timing/SETTS/video mux scheduling.
+
+Exclude channel2=0 and worker40/60 generations from the A/B verdict.
 
 ## Current deployment state
 
-- Normal FFmpeg state diagnostics deployed and proven.
-- H264 shape diagnostics deployed and proven.
-- `8db7d481...`, `0fecfe106...`, and `3f34ee8d...` were deployed but did not activate A/B (`video_only=0`).
-- Hardened detector commit `198f5154...` is **in GitHub and not yet confirmed deployed**.
-- No worker rebuild required.
-- `run.sh` unchanged; all `ffmpeg_state=` lines are already allowlisted.
+At this checkpoint:
 
-## Next step
+- normal FFmpeg state diagnostics are deployed and proven;
+- H264 shape diagnostics are deployed and proven;
+- `198f5154...` detector-source logging was deployed and proved PTZ detection remained `none`;
+- new deterministic source commits `8e11d5b2...` and `3b0b5225...` are in GitHub and **not yet confirmed deployed to HA**;
+- both changed Python files must be staged into the App context;
+- no native worker rebuild is required;
+- `run.sh` needs no change because `ffmpeg_state=` is already allowlisted.
 
-Deploy only updated root-level `yi_ffmpeg_state_wrapper.py`:
+## Next deployment step
 
-1. laptop: pull, `py_compile`, prepare App context, copy staged wrapper to HA App context;
-2. HA: rebuild/restart `local_yi_home`;
-3. first inspect PTZ `ffmpeg_state=ptz_detection=...`;
-4. if source is not `none`, require `ptz_video_only_ab_active` and later `video_only=1` before judging A/B;
-5. collect several valid Class-A generations;
-6. exclude channel2=0 and worker60 generations.
+Laptop must pull, syntax-check both changed Python files, prepare App context, and copy both staged files to HA App context in one command.
+
+HA must rebuild/restart `local_yi_home` in one command.
+
+First proof required from the next App log:
+
+```text
+camera=e2f22804fecd ... ffmpeg_state=ptz_detection=stable_id_env
+camera=e2f22804fecd ... ffmpeg_state=ptz_video_only_ab_active
+```
+
+Other cameras should remain:
+
+```text
+ffmpeg_state=ptz_detection=none
+```
+
+Only after activation is proven should Class-A video-only behavior be judged.
 
 ## Do not do next
 
