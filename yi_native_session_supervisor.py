@@ -3,18 +3,15 @@
 
 The proven relay remains responsible for PPPP/TNP and MPEG-TS generation. This
 wrapper only forwards its stdout to go2rtc and watches for forward progress. If
-the child stops producing bytes after startup, the wrapper first asks the relay
-parent to stop gracefully so it can close the native PPPP/TNP session, then
-falls back to process-group termination only if that bounded grace period
-expires. A persistent go2rtc preload consumer can then recreate a fresh
-producer/session without leaving QEMU/FFmpeg orphans.
+the child stops producing bytes after startup, the wrapper terminates the full
+relay process group and exits non-zero so a persistent go2rtc preload consumer
+can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
 
-For HA OS diagnosis, startup stalls use a distinct exit code. Both startup and
-post-start media stalls prefer a relay-owned, secret-safe child-state marker
-that reports only whether the qemu-aarch64 worker and ffmpeg mux are alive plus
-one fixed blocking stage. A /proc descendant snapshot remains a development
-fallback for post-start stalls. No command lines, PIDs or runtime material are
-surfaced.
+For HA OS diagnosis, startup stalls use a distinct exit code. Post-start media
+stalls prefer a relay-owned, secret-safe child-state marker that reports only
+whether the qemu-aarch64 worker and ffmpeg mux are alive plus one fixed blocking
+stage. A /proc descendant snapshot remains a development fallback. No command
+lines, PIDs or runtime material are surfaced.
 """
 
 from __future__ import annotations
@@ -91,33 +88,13 @@ def signal_child_group(child: subprocess.Popen[bytes], sig: signal.Signals) -> N
 def terminate_child(child: subprocess.Popen[bytes], grace: float) -> None:
     if child.poll() is not None:
         return
-
-    # The relay owns graceful shutdown of the native worker: on SIGTERM it
-    # writes the stop byte to the worker, which then sends STOP_LIVE and closes
-    # PPPP before exiting. Signalling the whole process group immediately also
-    # SIGTERMs QEMU, bypassing that cleanup and can leave the camera refusing a
-    # rapid reconnect. Give the relay parent one bounded chance to clean up
-    # first, then retain the old process-group fallback for stuck generations.
-    log("terminate_scope=relay_parent; signal=SIGTERM; graceful_pppp_cleanup=true")
-    try:
-        child.send_signal(signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        child.wait(timeout=max(0.1, grace))
-        log("terminate_result=graceful_relay_exit")
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    log("terminate_scope=process_group; signal=SIGTERM; reason=grace_timeout")
+    log("terminate_scope=process_group; signal=SIGTERM")
     signal_child_group(child, signal.SIGTERM)
     try:
         child.wait(timeout=max(0.1, grace))
         return
     except subprocess.TimeoutExpired:
         pass
-
     log("terminate_scope=process_group; signal=SIGKILL")
     signal_child_group(child, signal.SIGKILL)
     try:
@@ -188,15 +165,6 @@ def _read_child_state_marker(
     if values["ffmpeg_alive"]:
         comms.add("ffmpeg")
     return comms, relay_stage
-
-
-def _startup_stall_stage(marker_path: Path | None) -> tuple[str, str]:
-    """Return only the allowlisted relay stage for a startup stall."""
-    marker = _read_child_state_marker(marker_path)
-    if marker is None:
-        return "unavailable", "unavailable"
-    _marker_comms, relay_stage = marker
-    return relay_stage or "unavailable", "relay_marker"
 
 
 def _read_proc_children(pid: int) -> list[int] | None:
@@ -411,10 +379,8 @@ def main() -> int:
             now = time.monotonic()
             elapsed = now - last_data
             if not started and elapsed >= args.startup_timeout:
-                startup_stage, startup_stage_source = _startup_stall_stage(marker_path)
                 log(
                     f"startup_stall_detected=true; silence_seconds={elapsed:.1f}; "
-                    f"relay_stage={startup_stage}; stall_state_source={startup_stage_source}; "
                     f"diagnostic_exit_code={EXIT_STARTUP_STALL}; action=terminate_and_recreate"
                 )
                 terminate_child(child, args.terminate_grace)

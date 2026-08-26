@@ -126,6 +126,7 @@ def decrypt_audio_unit(raw: bytes, password: str) -> tuple[int, bytes, dict[str,
     access_unit = raw[32:]
     key = (password + "0").encode("ascii")
     if len(key) != 16:
+        # This is a session/config invariant, not a packet-level corruption.
         raise RuntimeError("TNP audio AES key is not 16 bytes")
     aligned = (len(access_unit) // 16) * 16
     if aligned:
@@ -229,24 +230,18 @@ def _start_ffmpeg_stdout(ffmpeg: str, video_offset_ms: int, audio_offset_ms: int
     ts_r, ts_w = os.pipe()
     ts_writer = os.fdopen(ts_w, "wb", buffering=0)
 
-    # Live publication already knows the elementary-stream formats and input
-    # frame rate. Keep FFmpeg's stream-info phase deliberately tiny so an
-    # otherwise valid H264/AAC session cannot sit behind a large raw-input
-    # probe window until EOF. The finite validation/file path above is left
-    # untouched.
     video_opts = [
         "-thread_queue_size", "512",
-        "-probesize", "4096",
-        "-analyzeduration", "0",
-        "-fpsprobesize", "0",
+        "-probesize", "262144",
+        "-analyzeduration", "500000",
         "-fflags", "+nobuffer",
         "-r", str(VIDEO_FPS),
         "-f", "h264", "-i", f"pipe:{video_r}",
     ]
     audio_opts = [
         "-thread_queue_size", "512",
-        "-probesize", "1024",
-        "-analyzeduration", "0",
+        "-probesize", "32768",
+        "-analyzeduration", "200000",
         "-f", "aac", "-i", f"pipe:{audio_r}",
     ]
     command = [
@@ -259,7 +254,7 @@ def _start_ffmpeg_stdout(ffmpeg: str, video_offset_ms: int, audio_offset_ms: int
         "-mpegts_flags", "+resend_headers", "-f", "mpegts", "pipe:1",
     ]
 
-    log("mpegts_streaming_probe_tuning=video_probe_4096/video_analyze_0/video_fpsprobe_0/audio_probe_1024/audio_analyze_0/thread_queue_512/flush_packets")
+    log("mpegts_streaming_probe_tuning=video_probe_262144/video_analyze_500ms/audio_probe_32768/audio_analyze_200ms/thread_queue_512/flush_packets")
     log(
         "mpegts_timestamp_mode=SETTS_90KHZ; "
         f"video_step_ticks={VIDEO_TICKS}; audio_step_ticks={AUDIO_TICKS}; "
@@ -478,7 +473,6 @@ def main() -> int:
         pre_video: list[tuple[int, bytes]] = []
         pre_audio: list[tuple[int, bytes]] = []
         first_video_ts: int | None = None
-        first_video_nal_types: tuple[int, ...] | None = None
         first_audio_ts: int | None = None
         audio_format: dict[str, int] | None = None
         video_frames = 0
@@ -509,15 +503,7 @@ def main() -> int:
                 audio_pipe.write(frame)
             pre_video.clear()
             pre_audio.clear()
-            nal_types = first_video_nal_types or ()
-            nal_text = ",".join(str(value) for value in nal_types) if nal_types else "none"
-            log(
-                "mpegts_mux=STARTED; "
-                f"first_video_nal_types={nal_text}; "
-                f"first_video_has_sps={1 if 7 in nal_types else 0}; "
-                f"first_video_has_pps={1 if 8 in nal_types else 0}; "
-                f"first_video_has_idr={1 if 5 in nal_types else 0}"
-            )
+            log("mpegts_mux=STARTED")
 
         try:
             while True:
@@ -538,6 +524,12 @@ def main() -> int:
                     try:
                         timestamp_ms, aac, fmt = decrypt_audio_unit(raw, material.password)
                     except AudioUnitValidationError:
+                        # A long-running live PPPP session may occasionally yield
+                        # one malformed/corrupt channel-1 record. The native
+                        # worker has already framed the record atomically, so one
+                        # bad audio unit must not tear down otherwise healthy
+                        # H.264 publication. Drop only the isolated audio record;
+                        # session/config invariants still raise normal errors.
                         audio_validation_drops += 1
                         if audio_validation_drops <= 3 or (
                             audio_validation_drops & (audio_validation_drops - 1)
@@ -567,9 +559,6 @@ def main() -> int:
                     timestamp_ms = int(ready["timestamp_ms"])
                     if first_video_ts is None:
                         first_video_ts = timestamp_ms
-                        first_video_nal_types = tuple(
-                            int(value) for value in ready.get("nal_unit_types", ())
-                        )
                     video_frames += 1
                     data = ready["output_payload"]
                     if mux is None:

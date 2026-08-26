@@ -8,10 +8,7 @@ RTSP_PORT=8554
 TOKEN_FILE="/data/backend-api-token"
 ENV_FILE="/data/yi.env"
 BACKEND_PID=""
-DIAG_PID=""
 BACKEND_STOP_TIMEOUT_SECONDS=20
-FFMPEG_WRAPPER_DIR="/tmp/yi-ffmpeg-wrapper"
-FFMPEG_WRAPPER="${APP_ROOT}/yi_ffmpeg_state_wrapper.py"
 
 mkdir -p /data
 chmod 0700 /data 2>/dev/null || true
@@ -51,25 +48,6 @@ chmod 0600 "${ENV_FILE}"
 export YI_ADDON_API_TOKEN="${API_TOKEN}"
 export PYTHONUNBUFFERED=1
 
-# Keep the real FFmpeg process as the tracked mux PID while adding a live-only
-# stderr filter. The wrapper immediately execs the real binary. Non-YI-live
-# FFmpeg invocations are passed through byte-for-byte; the known YI live mux
-# changes only log verbosity from warning to info so fixed internal milestones
-# can be classified without exposing arbitrary FFmpeg stderr.
-REAL_FFMPEG="$(command -v ffmpeg || true)"
-if [[ -z "${REAL_FFMPEG}" ]] || [[ ! -x "${REAL_FFMPEG}" ]]; then
-  bashio::exit.nok "FFmpeg executable was not found."
-fi
-if [[ ! -f "${FFMPEG_WRAPPER}" ]]; then
-  bashio::exit.nok "Safe FFmpeg diagnostic wrapper is missing."
-fi
-mkdir -p "${FFMPEG_WRAPPER_DIR}"
-chmod 0755 "${FFMPEG_WRAPPER}"
-ln -sf "${FFMPEG_WRAPPER}" "${FFMPEG_WRAPPER_DIR}/ffmpeg"
-export YI_REAL_FFMPEG="${REAL_FFMPEG}"
-export PATH="${FFMPEG_WRAPPER_DIR}:${PATH}"
-bashio::log.info "Safe live FFmpeg state diagnostics enabled; raw_ffmpeg_stderr_exposed=false."
-
 terminate_backend() {
   local pid="${BACKEND_PID}"
   if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
@@ -96,103 +74,7 @@ terminate_backend() {
   kill -KILL "${pid}" 2>/dev/null || true
   wait "${pid}" 2>/dev/null || true
 }
-
-terminate_diagnostics() {
-  local pid="${DIAG_PID}"
-  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
-    return
-  fi
-  kill -TERM "${pid}" 2>/dev/null || true
-  wait "${pid}" 2>/dev/null || true
-}
-
-cleanup() {
-  terminate_backend
-  terminate_diagnostics
-}
-trap cleanup TERM INT EXIT
-
-# Per-camera runtimes intentionally keep their full stderr inside /data/runtime.
-# Mirror only fixed, secret-safe diagnostic lines to stdout so
-# `ha apps logs local_yi_home` can diagnose restart loops without exposing raw
-# relay output, command lines, credentials, UID/DID values or API tokens.
-python3 -u - <<'PY' &
-from pathlib import Path
-import time
-
-root = Path("/data/runtime")
-positions: dict[Path, int] = {}
-safe_worker_prefixes = (
-    "[phase3g-worker] PPPP_Initialize_rc_hex=",
-    "[phase3g-worker] PPPP_Connect_rc_hex=",
-    "[phase3g-worker] PPPP_Write_4881_rc_hex=",
-    "[phase3g-worker] PPPP_Write_9029_rc_hex=",
-    "[phase3g-worker] PPPP_Write_768_rc_hex=",
-    "[phase3g-worker] tnp_response_version=",
-    "[phase3g-worker] tnp_response_command=",
-    "[phase3g-worker] tnp_response_command_number=",
-    "[phase3g-worker] tnp_auth_result=",
-    "[phase3g-worker] phase3g_tnp_auth=PASS",
-    "[phase3g-worker] phase3g_media_readers=STARTED",
-    "[phase3g-worker] channel1_records=",
-    "[phase3g-worker] channel2_records=",
-    "[phase3g-worker] channel3_records=",
-)
-safe_relay_prefixes = (
-    "[phase3g-relay] native_worker_exit=",
-    "[phase3g-relay] initial_av_delta_ms=",
-    "[phase3g-relay] mpegts_mux=STARTED",
-    "[phase3g-relay] mpegts_stdout_first_chunk_bytes=",
-    "[phase3g-relay] mpegts_stdout_pumped_bytes=",
-    "[phase3g-relay] ffmpeg_state=",
-)
-safe_live_relay_prefixes = (
-    "[yi-live-relay] startup_video_frame=",
-)
-
-# Existing files may contain historical runtime material. Start at their current
-# EOF so only diagnostics produced by this App run are surfaced.
-if root.is_dir():
-    for path in root.glob("*.log"):
-        try:
-            positions[path] = path.stat().st_size
-        except OSError:
-            pass
-
-while True:
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        for path in root.glob("*.log"):
-            try:
-                size = path.stat().st_size
-                offset = positions.get(path, 0)
-                if size < offset:
-                    offset = 0
-                if size == offset:
-                    positions[path] = offset
-                    continue
-                with path.open("r", encoding="utf-8", errors="replace") as handle:
-                    handle.seek(offset)
-                    for raw in handle:
-                        line = raw.rstrip("\r\n")
-                        if (
-                            line.startswith("[yi-session-supervisor]")
-                            or line.startswith(safe_relay_prefixes)
-                            or line.startswith(safe_worker_prefixes)
-                            or line.startswith(safe_live_relay_prefixes)
-                        ):
-                            print(
-                                f"[yi-runtime-diagnostic] camera={path.stem[:12]} {line}",
-                                flush=True,
-                            )
-                    positions[path] = handle.tell()
-            except (OSError, ValueError):
-                continue
-    except OSError:
-        pass
-    time.sleep(1.0)
-PY
-DIAG_PID=$!
+trap terminate_backend TERM INT
 
 bashio::log.info "Starting YI Home backend..."
 cd "${APP_ROOT}"
