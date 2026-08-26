@@ -3,9 +3,11 @@
 
 The proven relay remains responsible for PPPP/TNP and MPEG-TS generation. This
 wrapper only forwards its stdout to go2rtc and watches for forward progress. If
-the child stops producing bytes after startup, the wrapper terminates the full
-relay process group and exits non-zero so a persistent go2rtc preload consumer
-can recreate a fresh producer/session without leaving QEMU/FFmpeg orphans.
+the child stops producing bytes after startup, the wrapper first asks the relay
+parent to stop gracefully so it can close the native PPPP/TNP session, then
+falls back to process-group termination only if that bounded grace period
+expires. A persistent go2rtc preload consumer can then recreate a fresh
+producer/session without leaving QEMU/FFmpeg orphans.
 
 For HA OS diagnosis, startup stalls use a distinct exit code. Post-start media
 stalls prefer a relay-owned, secret-safe child-state marker that reports only
@@ -88,13 +90,33 @@ def signal_child_group(child: subprocess.Popen[bytes], sig: signal.Signals) -> N
 def terminate_child(child: subprocess.Popen[bytes], grace: float) -> None:
     if child.poll() is not None:
         return
-    log("terminate_scope=process_group; signal=SIGTERM")
+
+    # The relay owns graceful shutdown of the native worker: on SIGTERM it
+    # writes the stop byte to the worker, which then sends STOP_LIVE and closes
+    # PPPP before exiting. Signalling the whole process group immediately also
+    # SIGTERMs QEMU, bypassing that cleanup and can leave the camera refusing a
+    # rapid reconnect. Give the relay parent one bounded chance to clean up
+    # first, then retain the old process-group fallback for stuck generations.
+    log("terminate_scope=relay_parent; signal=SIGTERM; graceful_pppp_cleanup=true")
+    try:
+        child.send_signal(signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        child.wait(timeout=max(0.1, grace))
+        log("terminate_result=graceful_relay_exit")
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    log("terminate_scope=process_group; signal=SIGTERM; reason=grace_timeout")
     signal_child_group(child, signal.SIGTERM)
     try:
         child.wait(timeout=max(0.1, grace))
         return
     except subprocess.TimeoutExpired:
         pass
+
     log("terminate_scope=process_group; signal=SIGKILL")
     signal_child_group(child, signal.SIGKILL)
     try:
