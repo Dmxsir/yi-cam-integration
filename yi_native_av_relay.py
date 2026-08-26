@@ -126,7 +126,6 @@ def decrypt_audio_unit(raw: bytes, password: str) -> tuple[int, bytes, dict[str,
     access_unit = raw[32:]
     key = (password + "0").encode("ascii")
     if len(key) != 16:
-        # This is a session/config invariant, not a packet-level corruption.
         raise RuntimeError("TNP audio AES key is not 16 bytes")
     aligned = (len(access_unit) // 16) * 16
     if aligned:
@@ -479,6 +478,7 @@ def main() -> int:
         pre_video: list[tuple[int, bytes]] = []
         pre_audio: list[tuple[int, bytes]] = []
         first_video_ts: int | None = None
+        first_video_nal_types: tuple[int, ...] | None = None
         first_audio_ts: int | None = None
         audio_format: dict[str, int] | None = None
         video_frames = 0
@@ -509,7 +509,15 @@ def main() -> int:
                 audio_pipe.write(frame)
             pre_video.clear()
             pre_audio.clear()
-            log("mpegts_mux=STARTED")
+            nal_types = first_video_nal_types or ()
+            nal_text = ",".join(str(value) for value in nal_types) if nal_types else "none"
+            log(
+                "mpegts_mux=STARTED; "
+                f"first_video_nal_types={nal_text}; "
+                f"first_video_has_sps={1 if 7 in nal_types else 0}; "
+                f"first_video_has_pps={1 if 8 in nal_types else 0}; "
+                f"first_video_has_idr={1 if 5 in nal_types else 0}"
+            )
 
         try:
             while True:
@@ -530,12 +538,6 @@ def main() -> int:
                     try:
                         timestamp_ms, aac, fmt = decrypt_audio_unit(raw, material.password)
                     except AudioUnitValidationError:
-                        # A long-running live PPPP session may occasionally yield
-                        # one malformed/corrupt channel-1 record. The native
-                        # worker has already framed the record atomically, so one
-                        # bad audio unit must not tear down otherwise healthy
-                        # H.264 publication. Drop only the isolated audio record;
-                        # session/config invariants still raise normal errors.
                         audio_validation_drops += 1
                         if audio_validation_drops <= 3 or (
                             audio_validation_drops & (audio_validation_drops - 1)
@@ -565,6 +567,9 @@ def main() -> int:
                     timestamp_ms = int(ready["timestamp_ms"])
                     if first_video_ts is None:
                         first_video_ts = timestamp_ms
+                        first_video_nal_types = tuple(
+                            int(value) for value in ready.get("nal_unit_types", ())
+                        )
                     video_frames += 1
                     data = ready["output_payload"]
                     if mux is None:
