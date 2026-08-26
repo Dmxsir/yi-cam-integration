@@ -60,6 +60,7 @@ EXIT_RELAY_WORKER_PIPE_SETUP = 98
 # in time without dropping H.264/AAC packets. The finite validation/file path is
 # intentionally unchanged.
 LIVE_MAX_INTERLEAVE_DELTA_US = 500_000
+FFMPEG_STABLE_ID_ENV = "YI_FFMPEG_STABLE_ID"
 
 SAFE_RELAY_STAGES = {
     "native_header_read",
@@ -334,6 +335,7 @@ def main() -> int:
     stable_id = selected.stable_id.strip()
     if not stable_id:
         raise SystemExit("--stable-id must not be empty")
+    os.environ[FFMPEG_STABLE_ID_ENV] = stable_id
 
     def fresh_stable_target(timeout: float) -> tuple[Any, dict[str, Any]]:
         material, descriptor = yi_camera_runtime.runtime_material_for(
