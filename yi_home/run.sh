@@ -101,6 +101,19 @@ import time
 
 root = Path("/data/runtime")
 positions: dict[Path, int] = {}
+safe_worker_prefixes = (
+    "[phase3g-worker] PPPP_Initialize_rc_hex=",
+    "[phase3g-worker] PPPP_Connect_rc_hex=",
+    "[phase3g-worker] PPPP_Write_4881_rc_hex=",
+    "[phase3g-worker] PPPP_Write_9029_rc_hex=",
+    "[phase3g-worker] PPPP_Write_768_rc_hex=",
+    "[phase3g-worker] tnp_response_version=",
+    "[phase3g-worker] tnp_response_command=",
+    "[phase3g-worker] tnp_response_command_number=",
+    "[phase3g-worker] tnp_auth_result=",
+    "[phase3g-worker] phase3g_tnp_auth=PASS",
+    "[phase3g-worker] phase3g_media_readers=STARTED",
+)
 
 # Existing files may contain historical runtime material. Start at their current
 # EOF so only diagnostics produced by this App run are surfaced.
@@ -130,6 +143,7 @@ while True:
                         if (
                             line.startswith("[yi-session-supervisor]")
                             or line.startswith("[phase3g-relay] native_worker_exit=")
+                            or line.startswith(safe_worker_prefixes)
                         ):
                             print(
                                 f"[yi-runtime-diagnostic] camera={path.stem[:12]} {line}",
