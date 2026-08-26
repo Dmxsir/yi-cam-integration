@@ -6,6 +6,12 @@ unchanged for every non-live invocation. For the known live MPEG-TS path it
 changes only FFmpeg log verbosity from warning to info, captures stderr in a
 small filter process, and emits a fixed set of secret-safe state markers.
 
+A temporary A/B experiment is also scoped to the PTZ stable-id only. Its AAC
+input remains open and consumed normally, but the AAC stream is removed from
+the MPEG-TS output mapping so the live mux publishes H264 video only. This
+isolates output interleave/timestamp behavior without changing PPPP/TNP, the
+native worker, H264 framing, watchdogs, other cameras, or finite validation.
+
 No FFmpeg stderr text, arguments, paths, credentials, payload bytes, PIDs or
 camera material are copied into the diagnostic output.
 """
@@ -14,9 +20,11 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 
 SAFE_PREFIX = b"[phase3g-relay] ffmpeg_state="
+PTZ_VIDEO_ONLY_STABLE_ID = b"e2f22804fecd"
 
 
 def _is_yi_live_mux(args: list[str]) -> bool:
@@ -30,6 +38,22 @@ def _is_yi_live_mux(args: list[str]) -> bool:
     )
 
 
+def _parent_is_ptz_runtime() -> bool:
+    """Identify only the direct stable-id relay parent; never log cmdline data."""
+    try:
+        values = [
+            value
+            for value in Path(f"/proc/{os.getppid()}/cmdline").read_bytes().split(b"\0")
+            if value
+        ]
+    except OSError:
+        return False
+    for index, value in enumerate(values[:-1]):
+        if value == b"--stable-id" and values[index + 1] == PTZ_VIDEO_ONLY_STABLE_ID:
+            return True
+    return False
+
+
 def _with_info_loglevel(args: list[str]) -> list[str]:
     """Raise only the live diagnostic verbosity; media options stay untouched."""
     result = list(args)
@@ -37,6 +61,23 @@ def _with_info_loglevel(args: list[str]) -> list[str]:
         if result[index] == "-loglevel" and result[index + 1] == "warning":
             result[index + 1] = "info"
             break
+    return result
+
+
+def _with_video_only_output(args: list[str]) -> list[str]:
+    """Keep both inputs but remove only AAC from the PTZ MPEG-TS output map."""
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        option = args[index]
+        if option == "-map" and index + 1 < len(args) and args[index + 1] == "1:a:0":
+            index += 2
+            continue
+        if option == "-bsf:a" and index + 1 < len(args):
+            index += 2
+            continue
+        result.append(option)
+        index += 1
     return result
 
 
@@ -48,7 +89,7 @@ def _safe_write(fd: int, marker: str) -> None:
         pass
 
 
-def _filter_ffmpeg_stderr(read_fd: int, safe_fd: int) -> None:
+def _filter_ffmpeg_stderr(read_fd: int, safe_fd: int, video_only: bool) -> None:
     """Consume all FFmpeg stderr while exposing only allowlisted milestones."""
     seen: set[str] = set()
     states = {
@@ -68,6 +109,8 @@ def _filter_ffmpeg_stderr(read_fd: int, safe_fd: int) -> None:
         _safe_write(safe_fd, marker)
 
     _safe_write(safe_fd, "diagnostic_active")
+    if video_only:
+        _safe_write(safe_fd, "ptz_video_only_ab_active")
     try:
         with os.fdopen(read_fd, "rb", buffering=0) as stream:
             for raw in iter(stream.readline, b""):
@@ -89,6 +132,7 @@ def _filter_ffmpeg_stderr(read_fd: int, safe_fd: int) -> None:
     finally:
         summary = (
             "stderr_eof;"
+            f"video_only={int(video_only)};"
             f"video_input={int(states['video_input_open'])};"
             f"video_stream={int(states['video_stream_info'])};"
             f"audio_input={int(states['audio_input_open'])};"
@@ -117,7 +161,11 @@ def main() -> int:
         _exec_real(real_ffmpeg, args)
         return 127
 
+    video_only = _parent_is_ptz_runtime()
     diagnostic_args = _with_info_loglevel(args)
+    if video_only:
+        diagnostic_args = _with_video_only_output(diagnostic_args)
+
     try:
         read_fd, write_fd = os.pipe()
         safe_fd = os.dup(2)
@@ -136,7 +184,7 @@ def main() -> int:
     if pid == 0:
         try:
             os.close(write_fd)
-            _filter_ffmpeg_stderr(read_fd, safe_fd)
+            _filter_ffmpeg_stderr(read_fd, safe_fd, video_only)
         finally:
             os._exit(0)
 
