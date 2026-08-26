@@ -24,7 +24,9 @@ from pathlib import Path
 
 
 SAFE_PREFIX = b"[phase3g-relay] ffmpeg_state="
-PTZ_VIDEO_ONLY_STABLE_ID = b"e2f22804fecd"
+FFMPEG_STABLE_ID_ENV = "YI_FFMPEG_STABLE_ID"
+PTZ_VIDEO_ONLY_STABLE_ID_TEXT = "e2f22804fecd"
+PTZ_VIDEO_ONLY_STABLE_ID = PTZ_VIDEO_ONLY_STABLE_ID_TEXT.encode("ascii")
 PTZ_VIDEO_ONLY_LOG_NAME = "e2f22804fecd.log"
 MAX_ANCESTOR_SCAN = 8
 
@@ -89,6 +91,8 @@ def _parent_pid(pid: int) -> int | None:
 
 def _detect_ptz_runtime() -> str:
     """Return one fixed, secret-safe detector label or ``none``."""
+    if os.environ.get(FFMPEG_STABLE_ID_ENV, "").strip() == PTZ_VIDEO_ONLY_STABLE_ID_TEXT:
+        return "stable_id_env"
     if _stderr_is_ptz_runtime(os.getpid()):
         return "self_stderr"
 
