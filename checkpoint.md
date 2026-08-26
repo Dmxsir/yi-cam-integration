@@ -402,10 +402,11 @@ Do not treat all `6a` failures as the same PTZ root cause.
 
 ## Current temporary A/B experiment — PTZ MPEG-TS video-only output
 
-### Source commit
+### Source commits
 
 ```text
-8db7d48162fee17b89e4b78bc247f7004a066ad6
+8db7d48162fee17b89e4b78bc247f7004a066ad6  initial video-only mapping experiment
+0fecfe106b5f06c17901e3eb4658aeb8927d3ed6  fix PTZ runtime detection by ancestor scan
 ```
 
 Changed file:
@@ -416,17 +417,21 @@ yi_ffmpeg_state_wrapper.py
 
 ### Scope
 
-**Only** live FFmpeg invocations whose direct relay parent has:
+Only YI live FFmpeg invocations associated with runtime stable-id:
 
 ```text
---stable-id e2f22804fecd
+e2f22804fecd
 ```
 
 are modified.
 
+The initial `8db7d481...` implementation looked only at FFmpeg's direct parent for `--stable-id e2f22804fecd`. HA deployment logs proved that this did **not** match the real runtime topology: every PTZ FFmpeg summary still showed `video_only=0`, and `ffmpeg_state=ptz_video_only_ab_active` never appeared. Therefore the 2026-08-26 14:46 log is **not an A/B result** and must not be interpreted as evidence for or against AAC/interleave.
+
+`0fecfe106...` replaces direct-parent-only detection with a bounded, secret-safe Linux `/proc` ancestor scan (maximum 8 ancestors). It checks command lines only for the exact `--stable-id` pair and never logs command line contents, PIDs or other process data.
+
 All other cameras remain normal H264+AAC live output. Non-live/finite FFmpeg invocations are passed through unchanged.
 
-### Exact experiment behavior
+### Exact experiment behavior when activation is confirmed
 
 For PTZ live only:
 
@@ -438,19 +443,19 @@ For PTZ live only:
 - MPEG-TS output becomes video-only;
 - PPPP/TNP, native worker, two-stage 9029/768, H264 parsing, watchdog timeouts and reorder logic are unchanged.
 
-Safe deployment marker:
+Safe activation marker:
 
 ```text
 ffmpeg_state=ptz_video_only_ab_active
 ```
 
-The final stderr summary also includes:
+The final stderr summary must include:
 
 ```text
 video_only=1
 ```
 
-for the PTZ experiment. Other cameras should show `video_only=0`.
+for valid PTZ experiment generations. Other cameras should show `video_only=0`.
 
 ### Interpretation criteria
 
@@ -458,7 +463,7 @@ for the PTZ experiment. Other cameras should show `video_only=0`.
 
 Strong evidence that Class A is caused by the mapped AAC path, A/V timestamp relationship, or MPEG-TS A/V interleave/output scheduling. Next experiment should isolate which of those three is responsible while restoring audio afterward.
 
-**If PTZ video-only still reaches all FFmpeg milestones and then stalls until EOF:**
+**If PTZ video-only still reaches the video FFmpeg milestones and then stalls until EOF:**
 
 AAC output/interleave is not sufficient to explain Class A. Focus next on H264 packet timing/SETTS/FFmpeg mux scheduling on the video path.
 
@@ -470,25 +475,38 @@ Do not count that generation when judging the A/B result; the mux never has a de
 
 Also exclude that generation from Class-A A/B evaluation; it is Class C.
 
+### Latest deployment evidence
+
+The App rebuilt/restarted successfully at about 14:46 local time and the normal FFmpeg state wrapper was active. The PTZ continued to show Class-A stalls with complete A/V FFmpeg milestones, but all PTZ shutdown summaries explicitly showed:
+
+```text
+video_only=0
+```
+
+Examples in that run included valid Class-A generations with channel2 records present, all FFmpeg milestones reached, exit 74, and first TS only on SIGTERM. Because `video_only=0`, those generations only reconfirm the existing A/V failure and do not test the new hypothesis.
+
+The same run also showed `6a046d860b2d` post-start code-100 native-header stalls; those remain independent.
+
 ### Current deployment state
 
 At the time of this checkpoint update:
 
-- FFmpeg state diagnostic wrapper from `daa6ec85...` is deployed and proven;
+- FFmpeg state diagnostic wrapper is deployed and proven;
 - H264 shape diagnostics are deployed and proven;
-- new PTZ video-only A/B source commit `8db7d481...` is **in GitHub but not yet confirmed deployed to HA**;
-- no worker rebuild is required for this experiment;
+- initial A/B commit `8db7d481...` was deployed but **failed to activate** for PTZ because direct-parent detection did not match;
+- corrected A/B activation commit `0fecfe106...` is in GitHub and **not yet confirmed deployed to HA**;
+- no worker rebuild is required;
 - `run.sh` does not need another change because `ffmpeg_state=` is already allowlisted.
 
 ## Next deployment step
 
-Because only root-level Python `yi_ffmpeg_state_wrapper.py` changed:
+Because only root-level Python `yi_ffmpeg_state_wrapper.py` changed after the failed activation:
 
 1. laptop: pull branch, py_compile, run `tools/prepare_ha_app_context.py`, copy the staged wrapper into `/addons/yi_home/rootfs/opt/yi-home/app/`;
 2. HA: rebuild and restart `local_yi_home`;
-3. confirm `ffmpeg_state=ptz_video_only_ab_active` appears only for `camera=e2f22804fecd`;
-4. collect several PTZ generations;
-5. compare whether valid Class-A generations now reach `mpegts_stdout_first_chunk_bytes` promptly instead of exit 74;
+3. **first requirement:** confirm `ffmpeg_state=ptz_video_only_ab_active` appears for `camera=e2f22804fecd` and PTZ summary later reports `video_only=1`;
+4. only after activation is proven, collect several valid Class-A PTZ generations;
+5. compare whether they now reach `mpegts_stdout_first_chunk_bytes` promptly instead of exit 74;
 6. do not judge generations with channel2=0 or worker exit=60 as evidence for/against the FFmpeg A/B hypothesis.
 
 ## Do not do next
@@ -498,25 +516,3 @@ Because only root-level Python `yi_ffmpeg_state_wrapper.py` changed:
 - Do not add blind retries or additional 9029 commands.
 - Do not inject AUD yet.
 - Do not reopen solved Frigate networking/audio/export work.
-- Do not treat worker `-15` or supervisor kill return values as camera protocol errors.
-- Do not infer the semantic meaning of PPPP `-3003` without evidence.
-- Do not expose arbitrary FFmpeg/worker stderr.
-- Do not send more than one laptop command and one HA command per step.
-
-## Key files
-
-```text
-tools/phase3_pppp_probe/android_pppp_av_stream.c
-tools/phase3_pppp_probe/run_phase3e_tnp.py
-tools/phase3_pppp_probe/rebuild_phase3g_worker_and_stage_app.sh
-yi_live_relay.py
-yi_native_av_relay.py
-yi_native_av_relay_stable.py
-yi_native_session_supervisor.py
-yi_runtime_lifecycle.py
-yi_ffmpeg_state_wrapper.py
-yi_home/run.sh
-tools/prepare_ha_app_context.py
-docs/tnp-network-golden-trace.md
-checkpoint.md
-```
