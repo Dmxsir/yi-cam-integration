@@ -113,6 +113,9 @@ safe_worker_prefixes = (
     "[phase3g-worker] tnp_auth_result=",
     "[phase3g-worker] phase3g_tnp_auth=PASS",
     "[phase3g-worker] phase3g_media_readers=STARTED",
+    "[phase3g-worker] channel1_records=",
+    "[phase3g-worker] channel2_records=",
+    "[phase3g-worker] channel3_records=",
 )
 safe_relay_prefixes = (
     "[phase3g-relay] native_worker_exit=",
