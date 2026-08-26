@@ -124,6 +124,9 @@ safe_relay_prefixes = (
     "[phase3g-relay] mpegts_stdout_first_chunk_bytes=",
     "[phase3g-relay] mpegts_stdout_pumped_bytes=",
 )
+safe_live_relay_prefixes = (
+    "[yi-live-relay] startup_video_frame=",
+)
 
 # Existing files may contain historical runtime material. Start at their current
 # EOF so only diagnostics produced by this App run are surfaced.
@@ -154,6 +157,7 @@ while True:
                             line.startswith("[yi-session-supervisor]")
                             or line.startswith(safe_relay_prefixes)
                             or line.startswith(safe_worker_prefixes)
+                            or line.startswith(safe_live_relay_prefixes)
                         ):
                             print(
                                 f"[yi-runtime-diagnostic] camera={path.stem[:12]} {line}",
