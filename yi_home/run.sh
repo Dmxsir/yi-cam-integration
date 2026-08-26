@@ -8,6 +8,7 @@ RTSP_PORT=8554
 TOKEN_FILE="/data/backend-api-token"
 ENV_FILE="/data/yi.env"
 BACKEND_PID=""
+DIAG_PID=""
 BACKEND_STOP_TIMEOUT_SECONDS=20
 
 mkdir -p /data
@@ -74,7 +75,71 @@ terminate_backend() {
   kill -KILL "${pid}" 2>/dev/null || true
   wait "${pid}" 2>/dev/null || true
 }
-trap terminate_backend TERM INT
+
+terminate_diagnostics() {
+  local pid="${DIAG_PID}"
+  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+    return
+  fi
+  kill -TERM "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
+}
+
+cleanup() {
+  terminate_backend
+  terminate_diagnostics
+}
+trap cleanup TERM INT EXIT
+
+# Per-camera runtimes intentionally keep their full stderr inside /data/runtime.
+# Mirror only the supervisor's fixed, secret-safe diagnostic lines to stdout so
+# `ha apps logs local_yi_home` can diagnose restart loops without exposing raw
+# relay output, command lines, credentials, UID/DID values or API tokens.
+python3 -u - <<'PY' &
+from pathlib import Path
+import time
+
+root = Path("/data/runtime")
+positions: dict[Path, int] = {}
+
+# Existing files may contain historical runtime material. Start at their current
+# EOF so only diagnostics produced by this App run are surfaced.
+if root.is_dir():
+    for path in root.glob("*.log"):
+        try:
+            positions[path] = path.stat().st_size
+        except OSError:
+            pass
+
+while True:
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        for path in root.glob("*.log"):
+            try:
+                size = path.stat().st_size
+                offset = positions.get(path, 0)
+                if size < offset:
+                    offset = 0
+                if size == offset:
+                    positions[path] = offset
+                    continue
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(offset)
+                    for raw in handle:
+                        line = raw.rstrip("\r\n")
+                        if line.startswith("[yi-session-supervisor]"):
+                            print(
+                                f"[yi-runtime-diagnostic] camera={path.stem[:12]} {line}",
+                                flush=True,
+                            )
+                    positions[path] = handle.tell()
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    time.sleep(1.0)
+PY
+DIAG_PID=$!
 
 bashio::log.info "Starting YI Home backend..."
 cd "${APP_ROOT}"
