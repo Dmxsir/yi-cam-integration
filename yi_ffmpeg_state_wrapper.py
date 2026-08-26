@@ -25,6 +25,7 @@ from pathlib import Path
 
 SAFE_PREFIX = b"[phase3g-relay] ffmpeg_state="
 PTZ_VIDEO_ONLY_STABLE_ID = b"e2f22804fecd"
+PTZ_VIDEO_ONLY_LOG_NAME = "e2f22804fecd.log"
 MAX_ANCESTOR_SCAN = 8
 
 
@@ -37,6 +38,15 @@ def _is_yi_live_mux(args: list[str]) -> bool:
         and "-flush_packets" in args
         and any(value.startswith("setts=") for value in args)
     )
+
+
+def _stderr_is_ptz_runtime() -> bool:
+    """Identify the PTZ from its inherited per-camera runtime log descriptor."""
+    try:
+        target = Path(os.readlink("/proc/self/fd/2"))
+    except (OSError, ValueError):
+        return False
+    return target.name == PTZ_VIDEO_ONLY_LOG_NAME
 
 
 def _cmdline_is_ptz_runtime(pid: int) -> bool:
@@ -69,7 +79,7 @@ def _parent_pid(pid: int) -> int | None:
 
 
 def _ancestor_is_ptz_runtime() -> bool:
-    """Find the stable relay even when an exec/helper sits between it and us."""
+    """Fallback: find the stable relay even when helpers sit between it and us."""
     pid = os.getppid()
     seen: set[int] = set()
     for _ in range(MAX_ANCESTOR_SCAN):
@@ -192,7 +202,10 @@ def main() -> int:
         _exec_real(real_ffmpeg, args)
         return 127
 
-    video_only = _ancestor_is_ptz_runtime()
+    # The lifecycle manager gives every camera a dedicated stderr log file.
+    # Prefer that inherited descriptor because it is deterministic and does not
+    # depend on process ancestry. Keep the ancestry check only as a fallback.
+    video_only = _stderr_is_ptz_runtime() or _ancestor_is_ptz_runtime()
     diagnostic_args = _with_info_loglevel(args)
     if video_only:
         diagnostic_args = _with_video_only_output(diagnostic_args)
