@@ -27,6 +27,8 @@ import yi_tnp_oracle as oracle
 ALLOWED_TARGETS = ("POOL", "מחסן")
 DEFAULT_TARGET = "מחסן"
 H264_CODEC_ID = 78
+STARTUP_VIDEO_DIAG_LIMIT = 5
+_STARTUP_VIDEO_DIAG_COUNT = 0
 
 
 class SequenceReorderBuffer:
@@ -115,12 +117,37 @@ class SequenceReorderBuffer:
         return ready
 
 
+def _annexb_nal_sizes(payload: bytes) -> tuple[int, ...]:
+    """Return NAL payload sizes without exposing any H264 content."""
+    starts: list[tuple[int, int]] = []
+    index = 0
+    while index + 3 <= len(payload):
+        if index + 4 <= len(payload) and payload[index:index + 4] == b"\x00\x00\x00\x01":
+            starts.append((index, 4))
+            index += 4
+            continue
+        if payload[index:index + 3] == b"\x00\x00\x01":
+            starts.append((index, 3))
+            index += 3
+            continue
+        index += 1
+
+    sizes: list[int] = []
+    for position, (start, prefix_len) in enumerate(starts):
+        data_start = start + prefix_len
+        data_end = starts[position + 1][0] if position + 1 < len(starts) else len(payload)
+        sizes.append(max(0, data_end - data_start))
+    return tuple(sizes)
+
+
 def _decode_video_unit(
     channel: int,
     raw: bytes,
     password: str,
     encrypted: bool,
 ) -> dict[str, Any]:
+    global _STARTUP_VIDEO_DIAG_COUNT
+
     frame = oracle._parse_unit(channel, raw, password, encrypted)
     if frame["codec_id"] != H264_CODEC_ID:
         raise RuntimeError(f"Phase 2E expected H.264 codec id 78, got {frame['codec_id']}")
@@ -130,6 +157,19 @@ def _decode_video_unit(
     frame["framing"] = framing
     frame["nal_unit_types"] = nal_types
     frame["output_payload"] = output_payload
+
+    if _STARTUP_VIDEO_DIAG_COUNT < STARTUP_VIDEO_DIAG_LIMIT:
+        _STARTUP_VIDEO_DIAG_COUNT += 1
+        safe_types = tuple(int(value) for value in nal_types)
+        safe_sizes = _annexb_nal_sizes(output_payload)
+        _log(
+            f"startup_video_frame={_STARTUP_VIDEO_DIAG_COUNT}; "
+            f"channel={channel}; frame_type={frame.get('frame_type', 'UNKNOWN')}; "
+            f"nal_types={','.join(str(value) for value in safe_types) if safe_types else 'none'}; "
+            f"nal_count={len(safe_types)}; "
+            f"nal_sizes={','.join(str(value) for value in safe_sizes) if safe_sizes else 'none'}; "
+            f"payload_bytes={len(output_payload)}"
+        )
     return frame
 
 
