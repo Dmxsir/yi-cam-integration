@@ -92,7 +92,7 @@ cleanup() {
 trap cleanup TERM INT EXIT
 
 # Per-camera runtimes intentionally keep their full stderr inside /data/runtime.
-# Mirror only the supervisor's fixed, secret-safe diagnostic lines to stdout so
+# Mirror only fixed, secret-safe diagnostic lines to stdout so
 # `ha apps logs local_yi_home` can diagnose restart loops without exposing raw
 # relay output, command lines, credentials, UID/DID values or API tokens.
 python3 -u - <<'PY' &
@@ -127,7 +127,10 @@ while True:
                     handle.seek(offset)
                     for raw in handle:
                         line = raw.rstrip("\r\n")
-                        if line.startswith("[yi-session-supervisor]"):
+                        if (
+                            line.startswith("[yi-session-supervisor]")
+                            or line.startswith("[phase3g-relay] native_worker_exit=")
+                        ):
                             print(
                                 f"[yi-runtime-diagnostic] camera={path.stem[:12]} {line}",
                                 flush=True,
