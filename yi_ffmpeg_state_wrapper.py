@@ -40,13 +40,22 @@ def _is_yi_live_mux(args: list[str]) -> bool:
     )
 
 
-def _stderr_is_ptz_runtime() -> bool:
-    """Identify the PTZ from its inherited per-camera runtime log descriptor."""
+def _normalized_fd_target_name(pid: int, fd: int = 2) -> str | None:
+    """Return only a basename for one proc fd target; never surface the path."""
     try:
-        target = Path(os.readlink("/proc/self/fd/2"))
-    except (OSError, ValueError):
-        return False
-    return target.name == PTZ_VIDEO_ONLY_LOG_NAME
+        target = os.readlink(f"/proc/{pid}/fd/{fd}")
+    except OSError:
+        return None
+    name = Path(target).name
+    deleted_suffix = " (deleted)"
+    if name.endswith(deleted_suffix):
+        name = name[: -len(deleted_suffix)]
+    return name
+
+
+def _stderr_is_ptz_runtime(pid: int) -> bool:
+    """Identify the PTZ from a process' inherited per-camera stderr log."""
+    return _normalized_fd_target_name(pid, 2) == PTZ_VIDEO_ONLY_LOG_NAME
 
 
 def _cmdline_is_ptz_runtime(pid: int) -> bool:
@@ -78,21 +87,26 @@ def _parent_pid(pid: int) -> int | None:
     return parent if parent > 0 and parent != pid else None
 
 
-def _ancestor_is_ptz_runtime() -> bool:
-    """Fallback: find the stable relay even when helpers sit between it and us."""
+def _detect_ptz_runtime() -> str:
+    """Return one fixed, secret-safe detector label or ``none``."""
+    if _stderr_is_ptz_runtime(os.getpid()):
+        return "self_stderr"
+
     pid = os.getppid()
     seen: set[int] = set()
     for _ in range(MAX_ANCESTOR_SCAN):
         if pid <= 1 or pid in seen:
-            return False
+            break
         seen.add(pid)
+        if _stderr_is_ptz_runtime(pid):
+            return "ancestor_stderr"
         if _cmdline_is_ptz_runtime(pid):
-            return True
+            return "ancestor_cmdline"
         parent = _parent_pid(pid)
         if parent is None:
-            return False
+            break
         pid = parent
-    return False
+    return "none"
 
 
 def _with_info_loglevel(args: list[str]) -> list[str]:
@@ -130,7 +144,12 @@ def _safe_write(fd: int, marker: str) -> None:
         pass
 
 
-def _filter_ffmpeg_stderr(read_fd: int, safe_fd: int, video_only: bool) -> None:
+def _filter_ffmpeg_stderr(
+    read_fd: int,
+    safe_fd: int,
+    video_only: bool,
+    detection_source: str,
+) -> None:
     """Consume all FFmpeg stderr while exposing only allowlisted milestones."""
     seen: set[str] = set()
     states = {
@@ -150,6 +169,7 @@ def _filter_ffmpeg_stderr(read_fd: int, safe_fd: int, video_only: bool) -> None:
         _safe_write(safe_fd, marker)
 
     _safe_write(safe_fd, "diagnostic_active")
+    _safe_write(safe_fd, f"ptz_detection={detection_source}")
     if video_only:
         _safe_write(safe_fd, "ptz_video_only_ab_active")
     try:
@@ -202,10 +222,8 @@ def main() -> int:
         _exec_real(real_ffmpeg, args)
         return 127
 
-    # The lifecycle manager gives every camera a dedicated stderr log file.
-    # Prefer that inherited descriptor because it is deterministic and does not
-    # depend on process ancestry. Keep the ancestry check only as a fallback.
-    video_only = _stderr_is_ptz_runtime() or _ancestor_is_ptz_runtime()
+    detection_source = _detect_ptz_runtime()
+    video_only = detection_source != "none"
     diagnostic_args = _with_info_loglevel(args)
     if video_only:
         diagnostic_args = _with_video_only_output(diagnostic_args)
@@ -228,7 +246,7 @@ def main() -> int:
     if pid == 0:
         try:
             os.close(write_fd)
-            _filter_ffmpeg_stderr(read_fd, safe_fd, video_only)
+            _filter_ffmpeg_stderr(read_fd, safe_fd, video_only, detection_source)
         finally:
             os._exit(0)
 
