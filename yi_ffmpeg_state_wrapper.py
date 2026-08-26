@@ -6,11 +6,11 @@ unchanged for every non-live invocation. For the known live MPEG-TS path it
 changes only FFmpeg log verbosity from warning to info, captures stderr in a
 small filter process, and emits a fixed set of secret-safe state markers.
 
-A temporary A/B experiment is also scoped to the PTZ stable-id only. Its AAC
-input remains open and consumed normally, but the AAC stream is removed from
-the MPEG-TS output mapping so the live mux publishes H264 video only. This
-isolates output interleave/timestamp behavior without changing PPPP/TNP, the
-native worker, H264 framing, watchdogs, other cameras, or finite validation.
+A temporary A/B experiment is scoped to the PTZ stable-id only. The normal H264
+and AAC output mapping remains intact, while only the live raw-input probe
+settings are restored to the known Phase-6G baseline. PPPP/TNP, the native
+worker, timestamps, watchdogs, other cameras, and finite validation are left
+unchanged.
 
 No FFmpeg stderr text, arguments, paths, credentials, payload bytes, PIDs or
 camera material are copied into the diagnostic output.
@@ -25,9 +25,9 @@ from pathlib import Path
 
 SAFE_PREFIX = b"[phase3g-relay] ffmpeg_state="
 FFMPEG_STABLE_ID_ENV = "YI_FFMPEG_STABLE_ID"
-PTZ_VIDEO_ONLY_STABLE_ID_TEXT = "e2f22804fecdbd8c3561"
-PTZ_VIDEO_ONLY_STABLE_ID = PTZ_VIDEO_ONLY_STABLE_ID_TEXT.encode("ascii")
-PTZ_VIDEO_ONLY_LOG_NAME = "e2f22804fecdbd8c3561.log"
+PTZ_STABLE_ID_TEXT = "e2f22804fecdbd8c3561"
+PTZ_STABLE_ID = PTZ_STABLE_ID_TEXT.encode("ascii")
+PTZ_LOG_NAME = "e2f22804fecdbd8c3561.log"
 MAX_ANCESTOR_SCAN = 8
 
 
@@ -57,7 +57,7 @@ def _normalized_fd_target_name(pid: int, fd: int = 2) -> str | None:
 
 def _stderr_is_ptz_runtime(pid: int) -> bool:
     """Identify the PTZ from a process' inherited per-camera stderr log."""
-    return _normalized_fd_target_name(pid, 2) == PTZ_VIDEO_ONLY_LOG_NAME
+    return _normalized_fd_target_name(pid, 2) == PTZ_LOG_NAME
 
 
 def _cmdline_is_ptz_runtime(pid: int) -> bool:
@@ -71,7 +71,7 @@ def _cmdline_is_ptz_runtime(pid: int) -> bool:
     except OSError:
         return False
     for index, value in enumerate(values[:-1]):
-        if value == b"--stable-id" and values[index + 1] == PTZ_VIDEO_ONLY_STABLE_ID:
+        if value == b"--stable-id" and values[index + 1] == PTZ_STABLE_ID:
             return True
     return False
 
@@ -80,8 +80,6 @@ def _parent_pid(pid: int) -> int | None:
     """Return one Linux parent PID from /proc without exposing process data."""
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-        # comm is parenthesized and may contain spaces, so split only after the
-        # final ') '. Field 4 (ppid) is then item 1 in the remaining tail.
         tail = raw.rsplit(") ", 1)[1].split()
         parent = int(tail[1])
     except (OSError, UnicodeError, ValueError, IndexError):
@@ -91,7 +89,7 @@ def _parent_pid(pid: int) -> int | None:
 
 def _detect_ptz_runtime() -> str:
     """Return one fixed, secret-safe detector label or ``none``."""
-    if os.environ.get(FFMPEG_STABLE_ID_ENV, "").strip() == PTZ_VIDEO_ONLY_STABLE_ID_TEXT:
+    if os.environ.get(FFMPEG_STABLE_ID_ENV, "").strip() == PTZ_STABLE_ID_TEXT:
         return "stable_id_env"
     if _stderr_is_ptz_runtime(os.getpid()):
         return "self_stderr"
@@ -123,20 +121,36 @@ def _with_info_loglevel(args: list[str]) -> list[str]:
     return result
 
 
-def _with_video_only_output(args: list[str]) -> list[str]:
-    """Keep both inputs but remove only AAC from the PTZ MPEG-TS output map."""
+def _with_phase6g_probe_baseline(args: list[str]) -> list[str]:
+    """Restore only the two live raw-input probe windows to Phase-6G values."""
     result: list[str] = []
+    probesize_values = ("262144", "32768")
+    analyzeduration_values = ("500000", "200000")
+    probesize_index = 0
+    analyzeduration_index = 0
     index = 0
+
     while index < len(args):
         option = args[index]
-        if option == "-map" and index + 1 < len(args) and args[index + 1] == "1:a:0":
+        if option == "-fpsprobesize" and index + 1 < len(args):
+            # Phase 6G had no explicit fpsprobesize override.
             index += 2
             continue
-        if option == "-bsf:a" and index + 1 < len(args):
-            index += 2
-            continue
+        if option == "-probesize" and index + 1 < len(args):
+            if probesize_index < len(probesize_values):
+                result.extend((option, probesize_values[probesize_index]))
+                probesize_index += 1
+                index += 2
+                continue
+        if option == "-analyzeduration" and index + 1 < len(args):
+            if analyzeduration_index < len(analyzeduration_values):
+                result.extend((option, analyzeduration_values[analyzeduration_index]))
+                analyzeduration_index += 1
+                index += 2
+                continue
         result.append(option)
         index += 1
+
     return result
 
 
@@ -151,7 +165,7 @@ def _safe_write(fd: int, marker: str) -> None:
 def _filter_ffmpeg_stderr(
     read_fd: int,
     safe_fd: int,
-    video_only: bool,
+    phase6g_probe: bool,
     detection_source: str,
 ) -> None:
     """Consume all FFmpeg stderr while exposing only allowlisted milestones."""
@@ -174,8 +188,8 @@ def _filter_ffmpeg_stderr(
 
     _safe_write(safe_fd, "diagnostic_active")
     _safe_write(safe_fd, f"ptz_detection={detection_source}")
-    if video_only:
-        _safe_write(safe_fd, "ptz_video_only_ab_active")
+    if phase6g_probe:
+        _safe_write(safe_fd, "ptz_phase6g_probe_ab_active")
     try:
         with os.fdopen(read_fd, "rb", buffering=0) as stream:
             for raw in iter(stream.readline, b""):
@@ -197,7 +211,8 @@ def _filter_ffmpeg_stderr(
     finally:
         summary = (
             "stderr_eof;"
-            f"video_only={int(video_only)};"
+            "video_only=0;"
+            f"phase6g_probe={int(phase6g_probe)};"
             f"video_input={int(states['video_input_open'])};"
             f"video_stream={int(states['video_stream_info'])};"
             f"audio_input={int(states['audio_input_open'])};"
@@ -227,10 +242,10 @@ def main() -> int:
         return 127
 
     detection_source = _detect_ptz_runtime()
-    video_only = detection_source != "none"
+    phase6g_probe = detection_source != "none"
     diagnostic_args = _with_info_loglevel(args)
-    if video_only:
-        diagnostic_args = _with_video_only_output(diagnostic_args)
+    if phase6g_probe:
+        diagnostic_args = _with_phase6g_probe_baseline(diagnostic_args)
 
     try:
         read_fd, write_fd = os.pipe()
@@ -250,7 +265,7 @@ def main() -> int:
     if pid == 0:
         try:
             os.close(write_fd)
-            _filter_ffmpeg_stderr(read_fd, safe_fd, video_only, detection_source)
+            _filter_ffmpeg_stderr(read_fd, safe_fd, phase6g_probe, detection_source)
         finally:
             os._exit(0)
 
