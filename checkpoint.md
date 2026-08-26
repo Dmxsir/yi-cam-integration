@@ -4,22 +4,22 @@ _Last updated: 2026-08-26_
 _Branch: `phase-3-linux-pppp`_  
 _Repository: `Dmxsir/yi-cam-integration`_
 
-## Purpose of this file
+## Purpose
 
-This file is the canonical handoff/context document for continuing the project in a new ChatGPT chat or after context loss.
+This is the canonical handoff/context document for continuing the project in a new ChatGPT chat or after context loss.
 
-**Workflow rule going forward:** every repository change must also update this `checkpoint.md` so the current state, evidence, deployment status, and next step remain synchronized with the code.
+**Mandatory workflow rule:** every repository change must also update this `checkpoint.md` with the current code state, runtime evidence, deployment status, constraints, and next step.
 
 ## Interaction / deployment workflow
 
-The user wants a minimal command workflow:
+The user explicitly wants a minimal operational workflow:
 
 1. Assistant changes the GitHub repository directly.
-2. User receives **one command to run on the laptop**.
-3. User receives **one command to run on Home Assistant**.
-4. Do not dump long command sequences; proceed based on the result.
+2. Give the user **one command for the laptop**.
+3. Give the user **one command for Home Assistant**.
+4. Do not dump large command sequences; wait for the result and continue.
 
-Canonical local checkout:
+Canonical laptop checkout:
 
 ```text
 ~/Documents/yi-cam-integration-phase3
@@ -37,7 +37,7 @@ Home Assistant OS host:
 10.0.0.16
 ```
 
-Integration path:
+HA integration path:
 
 ```text
 /config/custom_components/yi_home
@@ -55,16 +55,16 @@ App slug:
 local_yi_home
 ```
 
-Public product names:
+Public names:
 
 - App: **YI RTSP**
 - Integration: **YI Camera Connect**
 
 Internal identifiers remain `yi_home`.
 
-## High-level project status
+## Overall project status
 
-The project reverse-engineers YI Home camera connectivity so cameras can be used from Home Assistant / Frigate without the phone being part of the live media path.
+The project reverse-engineers YI Home camera connectivity so the cameras can be consumed by Home Assistant / Frigate without the phone being part of the live media path.
 
 Current architecture:
 
@@ -78,13 +78,13 @@ YI camera
   -> external Frigate
 ```
 
-The App owns the camera runtime and go2rtc publication. Frigate is only a consumer.
+The App owns camera runtime and publication. Frigate is only a consumer.
 
-## Completed phase: 6G Frigate integration/export
+## Completed: Phase 6G Frigate integration/export
 
-Phase 6G is complete.
+Phase 6G is complete and should not be reopened unless new regression evidence appears.
 
-Stable Frigate source format:
+Stable source pattern:
 
 ```text
 rtsp://<HA-host>:<mapped-port>/yi_<stable-prefix>
@@ -96,11 +96,9 @@ Example PTZ source:
 rtsp://10.0.0.16:28554/yi_e2f22804fecd
 ```
 
-The mapped RTSP host port is discovered through Supervisor and must not be hardcoded in code.
+Mapped RTSP host port is dynamically discovered through Supervisor and must not be hardcoded in code.
 
-Frigate live audio requires an Opus branch in Frigate go2rtc while recordings preserve source audio.
-
-Example pattern:
+Frigate live audio uses an Opus branch in Frigate go2rtc while recordings preserve source audio, e.g.:
 
 ```yaml
 go2rtc:
@@ -110,7 +108,7 @@ go2rtc:
       - "ffmpeg:yi_pool#audio=opus"
 ```
 
-Recording uses:
+Recording pattern:
 
 ```yaml
 ffmpeg:
@@ -118,37 +116,35 @@ ffmpeg:
     record: preset-record-generic-audio-copy
 ```
 
-Validated previously:
+Previously validated:
 
-- live video works
-- audio works
-- Frigate detection works
-- Frigate recording works
-- stream OFF/ON lifecycle works
-- secret-safe inventory/export passes
+- live video
+- audio
+- Frigate detection
+- Frigate recording
+- stream OFF/ON lifecycle
+- secret-safe export/inventory
 
-Do **not** reopen solved Frigate networking/audio/export issues unless new regression evidence appears.
+## Current blocker: restart storm
 
-## Current blocker: runtime restart storm
+Do **not** start Phase 6E until runtime instability is resolved.
 
-Do not start Phase 6E until this instability is resolved.
-
-Two problematic runtime IDs are currently known:
+Problematic IDs currently observed:
 
 ```text
-e2f22804fecd  = PTZ front camera
-6a046d860b2d  = camera identity not yet explicitly mapped in this checkpoint
+e2f22804fecd = PTZ front
+6a046d860b2d = name not explicitly mapped in this checkpoint
 ```
 
-Known stable IDs/names:
+Known mapping:
 
 ```text
 867ecdee5a36 = pool
 ```
 
-Do not guess the names of other stable IDs without explicit evidence.
+Do not guess other camera-name mappings.
 
-## Relevant supervisor exit codes
+## Supervisor exit codes currently relevant
 
 From `yi_native_session_supervisor.py`:
 
@@ -165,40 +161,42 @@ From `yi_native_session_supervisor.py`:
 105 = relay_processing
 ```
 
-Important interpretation rule:
+Interpretation:
 
-- code 74 means no MPEG-TS bytes reached the supervisor within startup timeout
-- code 100 means media previously started and then the relay is waiting for the next native record header
-- these codes do not by themselves prove the camera connection is dead
+- `74`: no MPEG-TS bytes reached the supervisor within the 45 s startup timeout.
+- `100`: media had started previously; relay is now waiting for the next native record header.
+- `102`: live audio writer to FFmpeg is blocked.
 
-## Native worker exit meanings
+These codes do not automatically mean PPPP is disconnected.
+
+## Native worker exits
 
 For `android_pppp_av_stream`:
 
 ```text
 40 = PPPP_Connect returned negative
 50 = one or more PPPP_Write calls failed
-60 = first channel-0 PPPP_Read failed or returned a non-8-byte header
+60 = first channel-0 PPPP_Read failed / non-8-byte header
 61/62/63 = later response framing/body/auth validation failures
 ```
 
-Observed negative connect result:
+Observed connect value:
 
 ```text
 0xFFFFF445 = signed -3003
 ```
 
-The semantic meaning of `-3003` is **not proven**. Do not label it timeout/already-connected/etc.
+Its semantic meaning is **not proven**. Do not label it timeout/already-connected/etc.
 
-## Golden official TNP startup trace
+## Official TNP golden trace
 
-Golden trace document:
+Canonical document:
 
 ```text
 docs/tnp-golden-trace.md
 ```
 
-Current official 6.9.7 capture (POOL, model83/y291ga, TNP v2) proves the modern client performs a two-stage realtime start.
+Current official 6.9.7 capture proves a two-stage realtime start for the modern client.
 
 Important commands:
 
@@ -210,22 +208,22 @@ Important commands:
 4882 = SET_RESOLUTION response
 ```
 
-Official current-client sequence contains:
+Official current-client timing:
 
 ```text
 T+0 ms       9031 no.1
-T+3 ms       9029 no.2  payload use-count=1
+T+3 ms       9029 no.2  use-count=1
               768 no.3
               ...
-T+5928 ms    9029 no.11 payload use-count=2
+T+5928 ms    9029 no.11 use-count=2
               768 no.12
 ```
 
-The second `9029 + 768` is therefore runtime-proven and is not a guessed retry.
+The second `9029 + 768` is runtime-proven, not a guessed retry.
 
-The capture shows one initial channel-2 I-frame associated with use-count 1; continuous channel-1/channel-3 traffic begins shortly after the second `9029` with use-count 2.
+The first subscription produces an initial channel-2 I-frame with use-count 1. Continuous channel-1/channel-3 traffic begins around the second `9029` with use-count 2.
 
-## Two-stage worker change — deployed experiment
+## Two-stage worker change
 
 Commit:
 
@@ -239,16 +237,14 @@ Message:
 Match official two-stage realtime startup
 ```
 
-The native worker was changed so the existing host payload protocol did not need to change.
-
 Behavior:
 
-1. Host still supplies the existing 4881/9029/768/STOP units.
-2. Worker derives the official first-stage 9029 with use-count 1.
-3. Worker uses the original use-count-2 9029 as the second-stage command.
-4. Roughly 5.9 seconds later the worker sends the official second-stage `9029 + 768`.
+1. Host payload format remains the original four-unit `Y3F1` format.
+2. Worker derives the official first 9029 with use-count 1.
+3. Original use-count-2 9029 becomes second-stage command.
+4. About 5.9 s later worker sends second `9029 + 768` with official command numbers 11/12.
 
-This keeps the PoC/host protocol stable and limits the change to the continuous native worker.
+The host Python protocol was deliberately not changed.
 
 ## Worker build/staging helper
 
@@ -258,13 +254,13 @@ Commit:
 7c1e6cee8fa517cf4931a951e39200f8fffffb7e
 ```
 
-Added:
+Helper:
 
 ```text
 tools/phase3_pppp_probe/rebuild_phase3g_worker_and_stage_app.sh
 ```
 
-The user successfully ran:
+Previously validated output:
 
 ```text
 phase3g_worker_build=PASS
@@ -272,34 +268,43 @@ PHASE6D_APP_CONTEXT_PREPARE=PASS
 PHASE3G_WORKER_STAGE=PASS
 ```
 
-Built/staged worker SHA-256:
+Staged worker SHA-256:
 
 ```text
 67d12d6e56746a67d306a0ebff8ef07ee02aaef51954b38fe0e0383c5229fa5a
 ```
 
-The new worker was then copied into the HA App rootfs and the App was rebuilt/restarted.
+That worker is already deployed in the HA App.
 
-## Important App staging behavior
+## App staging rules — important
 
-`yi_home/Dockerfile` uses:
+`yi_home/Dockerfile`:
 
 ```dockerfile
 COPY rootfs/ /
 COPY run.sh /run.sh
 ```
 
+`tools/prepare_ha_app_context.py` copies root-level Python files to:
+
+```text
+yi_home/rootfs/opt/yi-home/app/
+```
+
+and the native/Bionic runtime to:
+
+```text
+yi_home/rootfs/opt/yi-home/runtime/bionic-root/
+```
+
 Therefore:
 
-- editing `yi_home/run.sh` directly affects the rebuilt App
-- root-level Python changes require the staged copies under `yi_home/rootfs/...`
-- C worker changes require rebuilding and staging the compiled AArch64 worker
+- `yi_home/run.sh` edits can be copied directly then App rebuilt.
+- root Python edits must be restaged with `tools/prepare_ha_app_context.py` before HA rebuild.
+- C worker edits require compile + staging.
+- never assume a root source change automatically reaches the App.
 
-Do not assume a root-level source edit reaches the App automatically.
-
-The helper script above now exists specifically to avoid stale worker staging.
-
-## Graceful relay shutdown fix
+## Graceful shutdown behavior
 
 Commit:
 
@@ -307,281 +312,388 @@ Commit:
 c97e5555bdd26ffd72c7df1583d8512ccbef5c15
 ```
 
-The supervisor now sends SIGTERM to the relay parent first, allowing the relay to send the stop byte to the native worker and execute normal PPPP cleanup before falling back to process-group SIGTERM/SIGKILL.
+Supervisor sends SIGTERM to relay parent first. Relay then sends its stop byte to native worker so STOP_LIVE / PPPP cleanup can occur before process-group fallback.
 
-This is validated in logs for PTZ: native worker and MPEG-TS mux can exit `0` and the supervisor reports `graceful_relay_exit`.
-
-For `6a046d860b2d`, graceful shutdown still sometimes exceeds the 3-second grace and falls back to process-group termination.
-
-Do not increase the grace period blindly without evidence.
-
-## Safe diagnostics added so far
-
-### Supervisor startup-stall stage
-
-Commit:
+PTZ often exits cleanly after watchdog shutdown:
 
 ```text
-80f3dc88b0484c98e5859196271f909940231c87
+native_worker_exit=0
+mpegts_mux_exit=0
+terminate_result=graceful_relay_exit
 ```
 
-Startup stall diagnostics now include allowlisted relay stage:
+`6a046d860b2d` can still exceed the grace period and require process-group SIGTERM/SIGKILL.
+
+Do not increase grace blindly.
+
+## Safe diagnostic bridge
+
+`yi_home/run.sh` mirrors only strict fixed-prefix, secret-safe lines from private per-camera runtime logs.
+
+Relevant commits:
 
 ```text
-startup_stall_detected=true; ... relay_stage=<safe-stage>; stall_state_source=...
+fdaeaf88694f62f770664e98d3476b69626bcda4  Expose safe runtime supervisor diagnostics in App logs
+ece12824b3411e16459598eeca06a4c19add392c  Expose native worker summary in App diagnostics
+06c95a5e2c0ebe49100e4546bcb4b0d629dffaf5  Expose safe PPPP startup diagnostics
+80f3dc88b0484c98e5859196271f909940231c87  Expose relay stage on startup stalls
+51de1808d318ae6e6f34f47cf9936aef44b40513  Expose safe MPEG-TS startup diagnostics
+ccb2d0b1d2db401105fd1635334dacce157c6415  Expose safe native channel record counters
 ```
 
-### Safe MPEG-TS startup diagnostics
-
-Commit:
+Current safe diagnostics include:
 
 ```text
-51de180
-```
-
-`yi_home/run.sh` now exposes allowlisted lines:
-
-```text
+PPPP_Initialize_rc_hex=
+PPPP_Connect_rc_hex=
+PPPP_Write_4881_rc_hex=
+PPPP_Write_9029_rc_hex=
+PPPP_Write_768_rc_hex=
+tnp_response_version=
+tnp_response_command=
+tnp_response_command_number=
+tnp_auth_result=
+phase3g_tnp_auth=PASS
+phase3g_media_readers=STARTED
+channel1_records=
+channel2_records=
+channel3_records=
 initial_av_delta_ms=
 mpegts_mux=STARTED
 mpegts_stdout_first_chunk_bytes=
 mpegts_stdout_pumped_bytes=
 ```
 
-### Native channel-record counters
+Never mirror arbitrary stderr, command lines, UID/DID, device keys, auth payloads, passwords, account tokens, or API tokens.
 
-Latest source commit before this checkpoint:
+## Decisive channel-counter evidence — 2026-08-26
+
+The counter instrumentation resolved the earlier uncertainty about whether PTZ was missing P-frames.
+
+### PTZ startup stall examples
+
+For `e2f22804fecd`, one exit-74 generation showed:
 
 ```text
-ccb2d0b1d2db401105fd1635334dacce157c6415
+channel1_records=30
+channel2_records=1
+channel3_records=35
+video_frames=36
+audio_frames=30
 ```
 
-Message:
+Yet the first MPEG-TS chunk appeared only after supervisor SIGTERM began.
+
+Another generation showed:
 
 ```text
-Expose safe native channel record counters
+channel1_records=19
+channel2_records=1
+channel3_records=23
+video_frames=24
+audio_frames=19
 ```
 
-`yi_home/run.sh` allowlist now also includes:
+Again, no supervisor-visible TS until shutdown.
+
+Another showed:
 
 ```text
-channel1_records=
-channel2_records=
-channel3_records=
+channel1_records=36
+channel2_records=1
+channel3_records=27
+video_frames=26
+audio_frames=36
 ```
 
-These counters already exist in the worker and are emitted during worker shutdown. This commit changes only log visibility, not runtime behavior.
+Again, the first TS chunk appeared only when the relay was being terminated.
 
-## Latest runtime evidence after two-stage 9029 change
+### Meaning
 
-A fresh App log after deploying the worker proved the second `9029 + 768` is actually being sent for all cameras.
+This decisively rules out the previous hypothesis that PTZ startup stalls happen because continuous P-frames are absent.
 
-Examples in the log show the initial writes followed later by another:
+During failed startup generations the host has:
+
+- audio packets
+- an I-frame
+- many P-frames
+- valid A/V timestamps
+- an FFmpeg mux process that is alive
+
+but FFmpeg often does not emit MPEG-TS until the input is closed.
+
+The primary PTZ startup suspect is therefore **FFmpeg raw H264/AAC stream-info probing/buffering**, not missing PPPP/TNP media subscription.
+
+### `6a046d860b2d` startup evidence
+
+One startup-stall generation showed:
 
 ```text
-PPPP_Write_9029_rc_hex=0x00000034
-PPPP_Write_768_rc_hex=0x00000038
+channel1_records=195
+channel2_records=4
+channel3_records=13
 ```
 
-### PTZ (`e2f22804fecd`)
+and the first MPEG-TS bytes also appeared only during termination.
 
-The two-stage TNP change improved the early startup path:
+So the same FFmpeg startup buffering behavior is not unique to PTZ.
 
-- PPPP initialize/connect succeeds
-- 4881/9029/768 writes succeed
-- TNP response 4882/auth passes
-- media readers start
-- both video and audio frames are present
-- `initial_av_delta_ms` is reasonable (examples ~28–79 ms)
-- `mpegts_mux=STARTED`
+## Separate post-start source stalls still exist
 
-However the PTZ still frequently hits startup exit 74.
+The FFmpeg startup issue is not the only failure mode.
 
-Key repeated pattern:
+### PTZ post-start native-header stall
+
+A later PTZ generation successfully emitted media, then after ~1.17 MB stopped producing new native records:
 
 ```text
-mpegts_mux=STARTED
-... 45 seconds with no supervisor-visible TS ...
-startup_stall_detected=true; relay_stage=native_header_read; code=74
-SIGTERM relay parent
-mpegts_stdout_first_chunk_bytes=...
-mpegts_stdout_pumped_bytes=...
-native_worker_exit=0; mpegts_mux_exit=0; video_frames>0; audio_frames>0
-graceful_relay_exit
+media_stall_detected=true
+forwarded_bytes=1170864
+stall_process_state=qemu_alive_ffmpeg_alive_native_header_wait
+code=100
 ```
 
-Concrete examples from the latest log included:
+At shutdown the worker counters were substantial:
 
 ```text
-video_frames=65; audio_frames=53
-video_frames=24; audio_frames=26
-video_frames=27; audio_frames=22
-video_frames=35; audio_frames=26
-video_frames=40; audio_frames=46
-video_frames=25; audio_frames=49
+channel1_records=237
+channel2_records=5
+channel3_records=284
 ```
 
-This is decisive evidence that:
+This is a separate problem: media had already started successfully, then the native source stopped advancing.
 
-- camera PPPP/TNP connection is alive
-- native H264 and AAC have reached the relay
-- FFmpeg mux process exists
-- MPEG-TS often appears only when the relay begins shutdown / pipe close
+### `6a046d860b2d` post-start stalls
 
-Therefore the current PTZ suspect is **FFmpeg H264 probing/buffering / stream structure**, not a missing PPPP connection.
-
-Do not add more blind 9029 commands or increase startup timeout.
-
-### `6a046d860b2d`
-
-This camera also benefits from two-stage startup and can successfully reach:
+Observed both:
 
 ```text
-mpegts_stdout_first_chunk...
-media_started=true
-```
-
-But it still suffers post-start media stalls.
-
-Observed examples:
-
-```text
-code=102
-stall state = qemu_alive_ffmpeg_alive_audio_pipe_write
-forwarded_bytes ~= 2.7 MB
+code=100 native_header_wait
 ```
 
 and:
 
 ```text
-code=100
-stall state = qemu_alive_ffmpeg_alive_native_header_wait
-forwarded_bytes ~= 4.2 MB
+code=102 audio_pipe_write
 ```
 
-and later another code 100 after ~1.1 MB.
-
-Its graceful relay shutdown also sometimes hangs and requires SIGTERM/SIGKILL fallback.
-
-Treat this as a distinct failure mode from the PTZ startup-mux behavior.
-
-## Current diagnostic hypothesis / next test
-
-The next diagnostic goal is to distinguish whether PTZ gives FFmpeg:
-
-1. mostly I-frames and few/no P-frames, or
-2. normal channel-2 + channel-3 video but FFmpeg still buffers output.
-
-The worker already reports on shutdown:
+One code-102 example had already forwarded more than 10 MB and accumulated:
 
 ```text
-channel1_records = audio
-channel2_records = video I-frame channel
-channel3_records = video P-frame channel
+channel1_records=2841
+channel2_records=84
+channel3_records=853
 ```
 
-The latest `run.sh` commit (`ccb2d0b`) exposes these values safely.
+So `6a046...` has a distinct long-running stability problem in addition to the startup-probe problem.
 
-### Deployment status at the moment this checkpoint was written
+Do not conflate the two failure classes.
 
-The user already:
+## Latest code change: minimal Live FFmpeg probing
 
-- pulled `ccb2d0b`
-- copied updated `yi_home/run.sh` to:
+Commit:
 
 ```text
-/addons/yi_home/run.sh
+328fd031caaee8a13b4b74bc2234f57cb9895874
 ```
 
-The HA rebuild/restart command was provided, but **execution confirmation had not yet been received when this checkpoint was created**.
-
-Therefore in the next chat/session, first establish whether the App has already been rebuilt/restarted after `ccb2d0b`.
-
-If it has, collect a fresh log until at least one PTZ exit-74 shutdown occurs and inspect:
+Message:
 
 ```text
-channel1_records=
-channel2_records=
-channel3_records=
+Minimize live FFmpeg input probing
 ```
 
-Interpretation:
+Changed file:
 
-- `channel2 > 0` and `channel3 ~= 0`: strong evidence continuous P-frame stream is not arriving; investigate TNP subscription/use-count/stream-channel behavior further.
-- `channel2 > 0` and `channel3 > 0` with substantial counts: video structure reaches host; focus on FFmpeg H264 parser/probe/buffering behavior.
-- counters unavailable: verify current run.sh is actually deployed and App rebuilt.
+```text
+yi_native_av_relay.py
+```
 
-## Current code directions / constraints
+Scope is intentionally limited to `_start_ffmpeg_stdout()` — the live stdout/go2rtc path only.
 
-Do not do the following without new evidence:
+Previous Live H264 input tuning:
 
-- do not increase startup timeout
-- do not add blind retries
-- do not add extra 9029 commands beyond the official two-stage sequence
-- do not start Phase 6E
-- do not reopen solved Frigate networking/audio/export work
-- do not interpret PPPP `-3003` beyond a negative connect result
-- do not treat watchdog SIGTERM (`-15`) as a camera protocol error
-- do not modify C worker unless required by evidence, because it requires binary rebuild/staging
-- do not use raw private GitHub curl commands on HA
-- do not guess camera-name mapping from stable IDs
-- do not expose raw worker stderr, credentials, UID/DID, device keys, tokens, passwords, or authentication payloads
+```text
+-probesize 262144
+-analyzeduration 500000
+-r 20
+-f h264
+```
 
-## Secret-safety rules
+Previous Live AAC input tuning:
 
-Diagnostics surfaced by `yi_home/run.sh` must remain strict fixed-prefix allowlists.
+```text
+-probesize 32768
+-analyzeduration 200000
+-f aac
+```
 
-Safe categories currently include:
+New Live H264 tuning:
 
-- PPPP return codes
-- TNP response version/command/number/auth result
-- known PASS markers
-- supervisor state classifications
-- safe relay stage names
-- frame/record counts
-- MPEG-TS byte counts
-- A/V timing offsets
+```text
+-probesize 4096
+-analyzeduration 0
+-fpsprobesize 0
+-r 20
+-f h264
+```
 
-Never mirror arbitrary worker/relay stderr to App stdout.
+New Live AAC tuning:
+
+```text
+-probesize 1024
+-analyzeduration 0
+-f aac
+```
+
+The existing settings remain:
+
+```text
+-thread_queue_size 512
+-fflags +nobuffer          # video input
+-flush_packets 1
+-muxdelay 0
+-muxpreload 0
+-mpegts_flags +resend_headers
+```
+
+The stable wrapper still supplies:
+
+```text
+-max_interleave_delta 500000
+```
+
+No change was made to:
+
+- PPPP
+- TNP command sequence
+- the two-stage 9029 behavior
+- worker binary
+- startup timeout (45 s)
+- media stall timeout (12 s)
+- retries
+- finite `--output` validation/file path
+
+New safe relay log string for the live path:
+
+```text
+mpegts_streaming_probe_tuning=video_probe_4096/video_analyze_0/video_fpsprobe_0/audio_probe_1024/audio_analyze_0/thread_queue_512/flush_packets
+```
+
+### Hypothesis being tested
+
+Because the formats are already explicitly declared as raw H264 and AAC and the input frame rate is already known (`-r 20`), large stream-info windows are unnecessary for the live path.
+
+Expected success pattern after deployment:
+
+```text
+initial_av_delta_ms=...
+mpegts_mux=STARTED
+mpegts_stdout_first_chunk_bytes=...
+media_started=true
+```
+
+with `mpegts_stdout_first_chunk_bytes` appearing promptly, not only after watchdog SIGTERM.
+
+If this significantly reduces PTZ exit-74 restarts, the FFmpeg startup-probing hypothesis is validated.
+
+If exit 74 remains and the first chunk still appears only during shutdown, next investigation should focus on FFmpeg mux/interleave/packet timestamp behavior rather than TNP.
+
+## Deployment status of latest commit
+
+At the time of this checkpoint update:
+
+- `328fd031...` is committed to GitHub.
+- `checkpoint.md` is updated for the new test.
+- The user has **not yet confirmed pulling/staging/deploying `328fd031...` to HA**.
+
+Required deployment model for this Python-only change:
+
+1. Laptop: pull branch, run `tools/prepare_ha_app_context.py`, then copy the staged `yi_native_av_relay.py` into the HA App rootfs.
+2. HA: rebuild and restart `local_yi_home`.
+
+Because the user wants one laptop command and one HA command, combine each environment's operations into one shell command.
+
+## What to inspect after deployment
+
+Let all five cameras run for several minutes without manual restarts.
+
+Primary test targets:
+
+```text
+e2f22804fecd
+6a046d860b2d
+```
+
+For PTZ, compare restart rate and look for:
+
+```text
+mpegts_mux=STARTED
+mpegts_stdout_first_chunk_bytes=...
+media_started=true
+```
+
+If `media_started=true` appears quickly and exit-74 loops largely disappear, do not immediately change anything else; observe long enough to isolate remaining code-100 source stalls.
+
+For `6a046...`, separately track:
+
+```text
+code=100 native_header_wait
+code=102 audio_pipe_write
+```
+
+The minimal-probe change is expected to address startup buffering only, not necessarily post-start source/writer stalls.
+
+## Constraints / do not do without new evidence
+
+- Do not increase startup timeout.
+- Do not increase media-stall timeout as a workaround.
+- Do not add blind retries.
+- Do not add more 9029 commands beyond the official two-stage sequence.
+- Do not start Phase 6E yet.
+- Do not reopen solved Frigate networking/audio/export issues.
+- Do not interpret `-3003` beyond a negative PPPP connect result.
+- Do not treat watchdog SIGTERM (`-15`) as a camera protocol error.
+- Do not modify C worker unless evidence requires it; C changes require binary rebuild/staging.
+- Do not use raw private GitHub curl commands on HA.
+- Do not guess camera-name mapping.
+- Do not expose secrets/raw worker stderr.
 
 ## Key files
 
 ```text
+checkpoint.md
+docs/tnp-golden-trace.md
 tools/phase3_pppp_probe/android_pppp_av_stream.c
 tools/phase3_pppp_probe/run_phase3e_tnp.py
 tools/phase3_pppp_probe/rebuild_phase3g_worker_and_stage_app.sh
+tools/prepare_ha_app_context.py
 yi_native_av_relay.py
 yi_native_av_relay_stable.py
 yi_native_session_supervisor.py
 yi_runtime_lifecycle.py
 yi_home/run.sh
-tools/prepare_ha_app_context.py
-docs/tnp-golden-trace.md
-checkpoint.md
 ```
 
-## Important commits (recent)
+## Important recent commits
 
 ```text
 1a561997cdb9e9ef3561f657ae32a5c5aed28d60  Mark Phase 6G Frigate integration complete
-05790ef...                                      Final Phase 6G validation
 fdaeaf88694f62f770664e98d3476b69626bcda4  Expose safe runtime supervisor diagnostics in App logs
 ece12824b3411e16459598eeca06a4c19add392c  Expose native worker summary in App diagnostics
 06c95a5e2c0ebe49100e4546bcb4b0d629dffaf5  Expose safe PPPP startup diagnostics
 c97e5555bdd26ffd72c7df1583d8512ccbef5c15  Gracefully stop relay before process-group fallback
 80f3dc88b0484c98e5859196271f909940231c87  Expose relay stage on startup stalls
-51de180                                         Expose safe MPEG-TS startup diagnostics
+51de1808d318ae6e6f34f47cf9936aef44b40513  Expose safe MPEG-TS startup diagnostics
 1d269056f6a6d86157b3ba59e1cdbb3b9bae3151  Match official two-stage realtime startup
-7c1e6cee8fa517cf4931a951e39200f8fffffb7e  Add worker rebuild/staging helper
+7c1e6cee8fa517cf4931a951e39200f8fffffb7e  Add Phase3G worker build/staging helper
 ccb2d0b1d2db401105fd1635334dacce157c6415  Expose safe native channel record counters
+4541006411fa6d03503f710a48f2c54d985b5560  Create canonical checkpoint
+328fd031caaee8a13b4b74bc2234f57cb9895874  Minimize live FFmpeg input probing
 ```
 
-## Recommended next action in a new chat
+## Immediate next step
 
-1. Read this `checkpoint.md` first.
-2. Confirm whether the HA App rebuild/restart after commit `ccb2d0b` already happened.
-3. If yes, obtain fresh App logs with at least one PTZ startup stall.
-4. Inspect `channel1_records`, `channel2_records`, and `channel3_records` from the PTZ shutdown.
-5. Make the next code change only after that evidence.
+Deploy `328fd031...` using exactly one laptop command and one HA command, then collect a fresh App log after several minutes.
 
-Do not jump directly to FFmpeg flags until the channel-2/channel-3 counter evidence is available.
+The next decision must be based on whether PTZ exit-74 startup loops disappear or substantially decrease under minimal Live probing.
