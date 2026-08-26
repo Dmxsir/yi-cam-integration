@@ -7,7 +7,10 @@
 #define MAX_UNIT 4096
 #define MAX_MEDIA (2U * 1024U * 1024U)
 #define TNP_VERSION 2
+#define CMD_START_REALTIME 9029
+#define CMD_START_AUDIO 768
 #define CMD_SET_RESOLUTION_RESP 4882
+#define LIVE_REFRESH_DELAY_MS 5900U
 
 extern void *dlopen(const char *filename, int flags);
 extern void *dlsym(void *handle, const char *symbol);
@@ -38,6 +41,32 @@ static long sys_write(int fd, const void *buf, unsigned long count) {
     register long x8 __asm__("x8") = 64;
     __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory");
     return x0;
+}
+
+typedef struct {
+    long tv_sec;
+    long tv_nsec;
+} kernel_timespec;
+
+static long sys_nanosleep(const kernel_timespec *request) {
+    register long x0 __asm__("x0") = (long)request;
+    register long x1 __asm__("x1") = 0;
+    register long x8 __asm__("x8") = 101;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory");
+    return x0;
+}
+
+static int wait_interruptible_ms(uint32_t milliseconds) {
+    uint32_t remaining = milliseconds;
+    while (remaining && !stop_requested) {
+        uint32_t step = remaining > 100U ? 100U : remaining;
+        kernel_timespec request;
+        request.tv_sec = 0;
+        request.tv_nsec = (long)step * 1000000L;
+        if (sys_nanosleep(&request) < 0 && !stop_requested) return -1;
+        remaining -= step;
+    }
+    return stop_requested ? 1 : 0;
 }
 
 static unsigned long str_len(const char *s) {
@@ -91,12 +120,21 @@ static int write_exact_stdout(const void *buf, unsigned long count) {
     return 0;
 }
 
+static void copy_bytes(unsigned char *destination, const unsigned char *source, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) destination[i] = source[i];
+}
+
 static uint16_t be16(const unsigned char *p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
 static uint32_t be32(const unsigned char *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void store_be16(unsigned char *p, uint16_t value) {
+    p[0] = (unsigned char)(value >> 8);
+    p[1] = (unsigned char)value;
 }
 
 static void store_be32(unsigned char *p, uint32_t value) {
@@ -111,6 +149,7 @@ static int magic_ok(const unsigned char *p) {
 }
 
 typedef int (*pppp_read_fn)(int, unsigned char, unsigned char *, int *, int);
+typedef int (*pppp_write_fn)(int, unsigned char, const unsigned char *, int);
 
 static int read_exact_pppp(pppp_read_fn fn, int handle, unsigned char channel,
                            unsigned char *buffer, uint32_t count) {
@@ -140,6 +179,15 @@ typedef struct {
     uint32_t emitted;
     int rc;
 } reader_ctx;
+
+typedef struct {
+    pppp_write_fn write_fn;
+    int handle;
+    const unsigned char *start_unit;
+    uint32_t start_len;
+    const unsigned char *audio_unit;
+    uint32_t audio_len;
+} refresh_ctx;
 
 static int emit_record(unsigned char channel, const unsigned char *outer,
                        const unsigned char *body, uint32_t body_size) {
@@ -190,6 +238,19 @@ static void *reader_main(void *opaque) {
     return 0;
 }
 
+static void *refresh_main(void *opaque) {
+    refresh_ctx *ctx = (refresh_ctx *)opaque;
+    if (wait_interruptible_ms(LIVE_REFRESH_DELAY_MS) != 0 || stop_requested) return 0;
+
+    int start_rc = ctx->write_fn(ctx->handle, 0, ctx->start_unit, (int)ctx->start_len);
+    log_str("PPPP_Write_9029_rc_hex="); log_hex32((uint32_t)start_rc);
+    if (start_rc < 0 || stop_requested) return 0;
+
+    int audio_rc = ctx->write_fn(ctx->handle, 0, ctx->audio_unit, (int)ctx->audio_len);
+    log_str("PPPP_Write_768_rc_hex="); log_hex32((uint32_t)audio_rc);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { log_str("phase3g_argument_error\n"); return 2; }
     const char *library = argv[1];
@@ -197,6 +258,7 @@ int main(int argc, char **argv) {
     unsigned char header[36];
     char did[MAX_FIELD], server[MAX_FIELD], device_key[MAX_FIELD];
     unsigned char unit1[MAX_UNIT], unit2[MAX_UNIT], unit3[MAX_UNIT], stop_unit[MAX_UNIT];
+    unsigned char initial_start_unit[MAX_UNIT], refresh_start_unit[MAX_UNIT], refresh_audio_unit[MAX_UNIT];
     unsigned char response[MAX_UNIT];
     unsigned char init_string[1] = {0};
     int initialized = 0;
@@ -218,6 +280,29 @@ int main(int argc, char **argv) {
         read_exact_stdin(unit1, unit1_len) || read_exact_stdin(unit2, unit2_len) || read_exact_stdin(unit3, unit3_len) || read_exact_stdin(stop_unit, stop_len)) return 12;
     did[did_len] = '\0'; server[server_len] = '\0'; device_key[key_len] = '\0';
 
+    /*
+     * The host already supplies the proven legacy burst as authenticated TNP
+     * units: 4881/no.1, 9029/no.2 with use-count 2, 768/no.3 and STOP 767.
+     * The current official client proves a two-stage live transition instead:
+     * 9029/no.2 use-count 1 first, then about 5.9s later 9029/no.11
+     * use-count 2 plus 768/no.12. TNP authInfo authenticates the session nonce,
+     * not these command-number/payload bytes, so derive the official variants
+     * locally without changing the secret-safe host/worker transport format.
+     */
+    if (unit2_len != 52U || unit2[0] != TNP_VERSION || unit2[1] != 3 ||
+        be32(unit2 + 4) != 44U || be16(unit2 + 8) != CMD_START_REALTIME ||
+        be16(unit2 + 10) != 2U || be16(unit2 + 14) != 4U || unit2[48] != 2U) return 13;
+    if (unit3_len != 56U || unit3[0] != TNP_VERSION || unit3[1] != 3 ||
+        be32(unit3 + 4) != 48U || be16(unit3 + 8) != CMD_START_AUDIO ||
+        be16(unit3 + 10) != 3U || be16(unit3 + 14) != 8U) return 14;
+
+    copy_bytes(initial_start_unit, unit2, unit2_len);
+    initial_start_unit[48] = 1U;
+    copy_bytes(refresh_start_unit, unit2, unit2_len);
+    store_be16(refresh_start_unit + 10, 11U);
+    copy_bytes(refresh_audio_unit, unit3, unit3_len);
+    store_be16(refresh_audio_unit + 10, 12U);
+
     void *so = dlopen(library, RTLD_NOW | RTLD_LOCAL);
     if (!so) { log_str("dlerror="); log_str(dlerror()); log_str("\n"); return 20; }
     int (*pppp_initialize)(const unsigned char *, int) = (int (*)(const unsigned char *, int))dlsym(so, "PPPP_Initialize");
@@ -226,7 +311,7 @@ int main(int argc, char **argv) {
     int (*pppp_wakeup_connect)(const char *, unsigned char, unsigned short, char *, char *) = (int (*)(const char *, unsigned char, unsigned short, char *, char *))dlsym(so, "PPPP_WakeUp_And_Connect");
     int (*pppp_connect_break)(const char *) = (int (*)(const char *))dlsym(so, "PPPP_Connect_Break");
     int (*pppp_force_close)(int) = (int (*)(int))dlsym(so, "PPPP_ForceClose");
-    int (*pppp_write)(int, unsigned char, const unsigned char *, int) = (int (*)(int, unsigned char, const unsigned char *, int))dlsym(so, "PPPP_Write");
+    pppp_write_fn pppp_write = (pppp_write_fn)dlsym(so, "PPPP_Write");
     pppp_read_fn pppp_read = (pppp_read_fn)dlsym(so, "PPPP_Read");
     if (!pppp_initialize || !pppp_deinitialize || !pppp_connect || !pppp_wakeup_connect || !pppp_connect_break || !pppp_force_close || !pppp_write || !pppp_read) return 21;
 
@@ -240,7 +325,7 @@ int main(int argc, char **argv) {
     if (handle_value < 0) { result_code = 40; goto cleanup; }
 
     int write1_rc = pppp_write(handle_value, 0, unit1, (int)unit1_len);
-    int write2_rc = pppp_write(handle_value, 0, unit2, (int)unit2_len);
+    int write2_rc = pppp_write(handle_value, 0, initial_start_unit, (int)unit2_len);
     if (write2_rc >= 0) live_started = 1;
     int write3_rc = pppp_write(handle_value, 0, unit3, (int)unit3_len);
     log_str("PPPP_Write_4881_rc_hex="); log_hex32((uint32_t)write1_rc);
@@ -267,11 +352,14 @@ int main(int argc, char **argv) {
     reader_ctx audio = {pppp_read, handle_value, 1, 2, 0, 0};
     reader_ctx iframe = {pppp_read, handle_value, 2, 1, 0, 0};
     reader_ctx pframe = {pppp_read, handle_value, 3, 1, 0, 0};
-    pthread_t ta = 0, ti = 0, tp = 0;
+    refresh_ctx refresh = {pppp_write, handle_value, refresh_start_unit, unit2_len, refresh_audio_unit, unit3_len};
+    pthread_t ta = 0, ti = 0, tp = 0, tr = 0;
     int ca = pthread_create(&ta, 0, reader_main, &audio);
     int ci = pthread_create(&ti, 0, reader_main, &iframe);
     int cp = pthread_create(&tp, 0, reader_main, &pframe);
     if (ca || ci || cp) { result_code = 71; stop_requested = 1; goto cleanup_threads; }
+    int cr = pthread_create(&tr, 0, refresh_main, &refresh);
+    if (cr) { result_code = 73; stop_requested = 1; goto cleanup_threads; }
     log_str("phase3g_media_readers=STARTED\n");
 
     {
@@ -283,6 +371,7 @@ int main(int argc, char **argv) {
     }
 
 cleanup_threads:
+    stop_requested = 1;
     if (handle_value >= 0 && live_started) {
         int stop_rc = pppp_write(handle_value, 0, stop_unit, (int)stop_len);
         log_str("PPPP_Write_767_rc_hex="); log_hex32((uint32_t)stop_rc);
@@ -293,14 +382,17 @@ cleanup_threads:
         int close_rc = pppp_force_close(handle_value);
         log_str("PPPP_ForceClose_rc_hex="); log_hex32((uint32_t)close_rc);
     }
+    if (tr) pthread_join(tr, 0);
     if (ta) pthread_join(ta, 0);
     if (ti) pthread_join(ti, 0);
     if (tp) pthread_join(tp, 0);
     log_str("channel1_records="); log_u32(audio.emitted);
     log_str("channel2_records="); log_u32(iframe.emitted);
     log_str("channel3_records="); log_u32(pframe.emitted);
-    if (!normal_stop && (audio.rc || iframe.rc || pframe.rc)) result_code = 72;
-    else result_code = 0;
+    if (result_code == 1) {
+        if (!normal_stop && (audio.rc || iframe.rc || pframe.rc)) result_code = 72;
+        else result_code = 0;
+    }
     handle_value = -1;
     live_started = 0;
 
