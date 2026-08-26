@@ -10,6 +10,8 @@ ENV_FILE="/data/yi.env"
 BACKEND_PID=""
 DIAG_PID=""
 BACKEND_STOP_TIMEOUT_SECONDS=20
+FFMPEG_WRAPPER_DIR="/tmp/yi-ffmpeg-wrapper"
+FFMPEG_WRAPPER="${APP_ROOT}/yi_ffmpeg_state_wrapper.py"
 
 mkdir -p /data
 chmod 0700 /data 2>/dev/null || true
@@ -48,6 +50,25 @@ chmod 0600 "${ENV_FILE}"
 
 export YI_ADDON_API_TOKEN="${API_TOKEN}"
 export PYTHONUNBUFFERED=1
+
+# Keep the real FFmpeg process as the tracked mux PID while adding a live-only
+# stderr filter. The wrapper immediately execs the real binary. Non-YI-live
+# FFmpeg invocations are passed through byte-for-byte; the known YI live mux
+# changes only log verbosity from warning to info so fixed internal milestones
+# can be classified without exposing arbitrary FFmpeg stderr.
+REAL_FFMPEG="$(command -v ffmpeg || true)"
+if [[ -z "${REAL_FFMPEG}" ]] || [[ ! -x "${REAL_FFMPEG}" ]]; then
+  bashio::exit.nok "FFmpeg executable was not found."
+fi
+if [[ ! -f "${FFMPEG_WRAPPER}" ]]; then
+  bashio::exit.nok "Safe FFmpeg diagnostic wrapper is missing."
+fi
+mkdir -p "${FFMPEG_WRAPPER_DIR}"
+chmod 0755 "${FFMPEG_WRAPPER}"
+ln -sf "${FFMPEG_WRAPPER}" "${FFMPEG_WRAPPER_DIR}/ffmpeg"
+export YI_REAL_FFMPEG="${REAL_FFMPEG}"
+export PATH="${FFMPEG_WRAPPER_DIR}:${PATH}"
+bashio::log.info "Safe live FFmpeg state diagnostics enabled; raw_ffmpeg_stderr_exposed=false."
 
 terminate_backend() {
   local pid="${BACKEND_PID}"
@@ -123,6 +144,7 @@ safe_relay_prefixes = (
     "[phase3g-relay] mpegts_mux=STARTED",
     "[phase3g-relay] mpegts_stdout_first_chunk_bytes=",
     "[phase3g-relay] mpegts_stdout_pumped_bytes=",
+    "[phase3g-relay] ffmpeg_state=",
 )
 safe_live_relay_prefixes = (
     "[yi-live-relay] startup_video_frame=",
