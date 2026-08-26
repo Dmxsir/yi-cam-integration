@@ -230,18 +230,24 @@ def _start_ffmpeg_stdout(ffmpeg: str, video_offset_ms: int, audio_offset_ms: int
     ts_r, ts_w = os.pipe()
     ts_writer = os.fdopen(ts_w, "wb", buffering=0)
 
+    # Live publication already knows the elementary-stream formats and input
+    # frame rate. Keep FFmpeg's stream-info phase deliberately tiny so an
+    # otherwise valid H264/AAC session cannot sit behind a large raw-input
+    # probe window until EOF. The finite validation/file path above is left
+    # untouched.
     video_opts = [
         "-thread_queue_size", "512",
-        "-probesize", "262144",
-        "-analyzeduration", "500000",
+        "-probesize", "4096",
+        "-analyzeduration", "0",
+        "-fpsprobesize", "0",
         "-fflags", "+nobuffer",
         "-r", str(VIDEO_FPS),
         "-f", "h264", "-i", f"pipe:{video_r}",
     ]
     audio_opts = [
         "-thread_queue_size", "512",
-        "-probesize", "32768",
-        "-analyzeduration", "200000",
+        "-probesize", "1024",
+        "-analyzeduration", "0",
         "-f", "aac", "-i", f"pipe:{audio_r}",
     ]
     command = [
@@ -254,7 +260,7 @@ def _start_ffmpeg_stdout(ffmpeg: str, video_offset_ms: int, audio_offset_ms: int
         "-mpegts_flags", "+resend_headers", "-f", "mpegts", "pipe:1",
     ]
 
-    log("mpegts_streaming_probe_tuning=video_probe_262144/video_analyze_500ms/audio_probe_32768/audio_analyze_200ms/thread_queue_512/flush_packets")
+    log("mpegts_streaming_probe_tuning=video_probe_4096/video_analyze_0/video_fpsprobe_0/audio_probe_1024/audio_analyze_0/thread_queue_512/flush_packets")
     log(
         "mpegts_timestamp_mode=SETTS_90KHZ; "
         f"video_step_ticks={VIDEO_TICKS}; audio_step_ticks={AUDIO_TICKS}; "
