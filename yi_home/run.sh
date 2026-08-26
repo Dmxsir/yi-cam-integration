@@ -114,6 +114,13 @@ safe_worker_prefixes = (
     "[phase3g-worker] phase3g_tnp_auth=PASS",
     "[phase3g-worker] phase3g_media_readers=STARTED",
 )
+safe_relay_prefixes = (
+    "[phase3g-relay] native_worker_exit=",
+    "[phase3g-relay] initial_av_delta_ms=",
+    "[phase3g-relay] mpegts_mux=STARTED",
+    "[phase3g-relay] mpegts_stdout_first_chunk_bytes=",
+    "[phase3g-relay] mpegts_stdout_pumped_bytes=",
+)
 
 # Existing files may contain historical runtime material. Start at their current
 # EOF so only diagnostics produced by this App run are surfaced.
@@ -142,7 +149,7 @@ while True:
                         line = raw.rstrip("\r\n")
                         if (
                             line.startswith("[yi-session-supervisor]")
-                            or line.startswith("[phase3g-relay] native_worker_exit=")
+                            or line.startswith(safe_relay_prefixes)
                             or line.startswith(safe_worker_prefixes)
                         ):
                             print(
