@@ -76,6 +76,16 @@ terminate_backend() {
 }
 trap terminate_backend TERM INT
 
+# One-shot, secret-safe environment fingerprint. This intentionally runs before
+# the backend starts and does not add a resident diagnostic process or touch the
+# media path. It exists only to identify mutable base-image/APK runtime versions.
+QEMU_VERSION="$(qemu-aarch64 --version 2>/dev/null | head -n 1 || true)"
+PYTHON_VERSION="$(python3 --version 2>&1 | head -n 1 || true)"
+QEMU_PACKAGE="$(apk info -v qemu-aarch64 2>/dev/null | head -n 1 || true)"
+PYTHON_PACKAGE="$(apk info -v python3 2>/dev/null | head -n 1 || true)"
+CRYPTO_PACKAGE="$(apk info -v py3-cryptography 2>/dev/null | head -n 1 || true)"
+bashio::log.info "Runtime versions: qemu=${QEMU_VERSION:-unknown}; python=${PYTHON_VERSION:-unknown}; qemu_package=${QEMU_PACKAGE:-unknown}; python_package=${PYTHON_PACKAGE:-unknown}; cryptography_package=${CRYPTO_PACKAGE:-unknown}; secrets_exposed=false."
+
 bashio::log.info "Starting YI Home backend..."
 cd "${APP_ROOT}"
 python3 yi_addon_service.py \
