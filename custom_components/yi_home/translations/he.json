@@ -11,6 +11,26 @@
           "country": "קוד מדינה",
           "region": "אזור שרת"
         }
+      },
+      "reconfigure": {
+        "title": "עדכון פרטי ההתחברות ל־YI Home",
+        "description": "יש להזין את החשבון והסיסמה העדכניים של YI Home. הפרטים מאומתים ונשמרים ב־YI Home App; הסיסמה אינה נשמרת ב־Config Entry של Home Assistant.",
+        "data": {
+          "account": "חשבון",
+          "password": "סיסמה",
+          "country": "קוד מדינה",
+          "region": "אזור שרת"
+        }
+      },
+      "reauth_confirm": {
+        "title": "חיבור מחדש לחשבון YI Home",
+        "description": "YI דחה את פרטי ההתחברות השמורים. יש להזין את החשבון והסיסמה העדכניים. הסיסמה נשלחת ישירות ל־YI Home App ואינה נשמרת ב־Config Entry של Home Assistant.",
+        "data": {
+          "account": "חשבון",
+          "password": "סיסמה",
+          "country": "קוד מדינה",
+          "region": "אזור שרת"
+        }
       }
     },
     "error": {

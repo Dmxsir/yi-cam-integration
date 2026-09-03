@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any, override
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -152,6 +153,16 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Collect YI credentials and hand them directly to the App."""
+        return await self._async_account_step("hassio_account", user_input)
+
+    async def _async_account_step(
+        self,
+        step_id: str,
+        user_input: dict[str, Any] | None,
+        *,
+        entry: ConfigEntry | None = None,
+    ) -> ConfigFlowResult:
+        """Validate YI credentials in the App without storing them in HA."""
         errors: dict[str, str] = {}
         if user_input is not None:
             payload = {
@@ -182,14 +193,22 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "account_setup_failed"
             else:
                 if result.get("configured") is True and result.get("secrets_exposed") is False:
-                    return await self._create_entry(
-                        region=str(result.get("region") or payload["region"]),
-                        country=str(result.get("country") or payload["country"]),
-                    )
+                    region = str(result.get("region") or payload["region"])
+                    country = str(result.get("country") or payload["country"])
+                    if entry is not None:
+                        return self.async_update_reload_and_abort(
+                            entry,
+                            data_updates={
+                                CONF_REGION: region,
+                                CONF_COUNTRY: country,
+                            },
+                        )
+                    return await self._create_entry(region=region, country=country)
                 errors["base"] = "account_setup_failed"
 
+        current_data = entry.data if entry is not None else {}
         return self.async_show_form(
-            step_id="hassio_account",
+            step_id=step_id,
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_ACCOUNT): selector.TextSelector(),
@@ -198,9 +217,45 @@ class YiHomeConfigFlow(ConfigFlow, domain=DOMAIN):
                             type=selector.TextSelectorType.PASSWORD
                         )
                     ),
-                    vol.Required(CONF_COUNTRY, default=DEFAULT_COUNTRY): selector.TextSelector(),
-                    vol.Required(CONF_REGION, default=DEFAULT_REGION): vol.In(REGIONS),
+                    vol.Required(
+                        CONF_COUNTRY,
+                        default=current_data.get(CONF_COUNTRY, DEFAULT_COUNTRY),
+                    ): selector.TextSelector(),
+                    vol.Required(
+                        CONF_REGION,
+                        default=current_data.get(CONF_REGION, DEFAULT_REGION),
+                    ): vol.In(REGIONS),
                 }
             ),
             errors=errors,
         )
+
+    @override
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Replace the YI account credentials stored by the App."""
+        entry = self._get_reconfigure_entry()
+        self._discovery = dict(entry.data)
+        self._app_name = entry.title
+        return await self._async_account_step("reconfigure", user_input, entry=entry)
+
+    @override
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start reauthentication after YI rejects stored credentials."""
+        entry = self._get_reauth_entry()
+        self._discovery = dict(entry.data)
+        self._app_name = entry.title
+        return await self.async_step_reauth_confirm()
+
+    @override
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Replace invalid YI account credentials stored by the App."""
+        entry = self._get_reauth_entry()
+        self._discovery = dict(entry.data)
+        self._app_name = entry.title
+        return await self._async_account_step("reauth_confirm", user_input, entry=entry)

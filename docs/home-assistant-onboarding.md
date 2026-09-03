@@ -93,10 +93,15 @@ Target v1 policy:
   licenses and InitString values remain secret-bearing backend data and are not
   exposed to the Integration.
 
-If YI authentication later becomes invalid, the App reports a secret-safe
-`reauth_required` state. The Integration starts a Home Assistant reauthentication
-flow, asks the user for fresh YI credentials, and sends the replacement to the
-App. Reinstalling the App should not be required.
+If the YI password changes, open **Settings -> Devices & services -> YI Home**,
+select **Reconfigure**, and enter the current account and password. The
+Integration validates the replacement through the App, updates the App-owned
+credential file atomically, and reloads the Config Entry. Reinstalling the App
+or Integration is not required.
+
+The same credential form is available as a Home Assistant reauthentication
+flow. Automatically starting that flow when credentials expire still depends
+on the App exposing a secret-safe `reauth_required` state.
 
 ## Synchronization model
 

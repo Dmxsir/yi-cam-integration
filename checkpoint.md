@@ -1,6 +1,6 @@
 # YI Camera Connect / YI RTSP — Project Checkpoint
 
-_Last updated: 2026-08-26_  
+_Last updated: 2026-09-03_
 _Branch: `phase-3-linux-pppp`  
 _Repository: `Dmxsir/yi-cam-integration`
 
@@ -52,6 +52,54 @@ YI camera
 ```
 
 The App owns the PPPP/TNP session. Home Assistant and Frigate consume the App-owned RTSP stream and do not create independent YI sessions.
+
+## Credential replacement UI — SOURCE COMPLETE, DEPLOYMENT PENDING
+
+Source state:
+
+- the existing YI Home Config Entry now exposes Home Assistant's standard
+  **Reconfigure** flow;
+- the same secret-safe account form is available for a future automatic
+  reauthentication trigger;
+- replacement credentials are validated and persisted by the App's existing
+  authenticated `/api/v1/account` endpoint;
+- the password and account remain absent from the Home Assistant Config Entry;
+- English and Hebrew UI strings and the Integration smoke gate cover both
+  account-update steps.
+
+Deployment state:
+
+- not yet copied to `/config/custom_components/yi_home` on HA OS;
+- the running Integration therefore still reports no reconfigure support.
+
+Evidence:
+
+```text
+config_flow Python compile: PASS
+English/Hebrew translation JSON parse: PASS
+Integration smoke gates through account-update translations and secret scan: PASS
+Windows tar bundle: PASS (45,592 bytes)
+bundle SHA-256: 2440b42243db3bf58123574dec0ba91a4de51b8b9f2a816f0e11320e7a3ddff0
+```
+
+The broad Python suite was also sampled: unrelated existing failures remain on
+Windows because several tests require POSIX file modes and APK feature assets.
+No failure touched the Integration account-update source.
+
+Conclusion:
+
+- changing a YI cloud password no longer requires reinstalling the App or
+  deleting the Integration once this Integration source is deployed;
+- automatic presentation of the reauthentication dialog still depends on the
+  App exposing a secret-safe `reauth_required` state.
+
+Next step:
+
+1. commit and push this source on `phase-3-linux-pppp`;
+2. deploy `custom_components/yi_home` to HA OS and restart Home Assistant;
+3. confirm the live entry reports reconfigure support;
+4. use the UI form to submit the current YI account/password and verify camera
+   discovery recovers.
 
 ## Phase 6G
 

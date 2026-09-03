@@ -46,6 +46,23 @@ grep -q 'HassioServiceInfo' "$COMPONENT/config_flow.py" || fail "HassioServiceIn
 grep -q 'return self.async_abort(reason="app_required")' "$COMPONENT/config_flow.py" || fail "manual user flow must not bypass App discovery"
 printf 'integration_hassio_discovery_flow=PASS\n'
 
+grep -q 'async_step_reconfigure' "$COMPONENT/config_flow.py" || fail "credential reconfiguration flow is missing"
+grep -q 'async_step_reauth_confirm' "$COMPONENT/config_flow.py" || fail "credential reauthentication flow is missing"
+grep -q 'async_update_reload_and_abort' "$COMPONENT/config_flow.py" || fail "credential update does not reload the integration"
+"$PYTHON" - "$COMPONENT/strings.json" "$COMPONENT/translations/he.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+for path in sys.argv[1:]:
+    strings = json.loads(Path(path).read_text(encoding="utf-8"))
+    steps = strings["config"]["step"]
+    assert "reconfigure" in steps
+    assert "reauth_confirm" in steps
+print("integration_account_update_translations=PASS")
+PY
+printf 'integration_account_update_flow=PASS\n'
+
 grep -q 'Platform.BINARY_SENSOR' "$COMPONENT/__init__.py" || fail "binary_sensor platform missing"
 grep -q 'Platform.SENSOR' "$COMPONENT/__init__.py" || fail "sensor platform missing"
 grep -q 'Platform.SWITCH' "$COMPONENT/__init__.py" || fail "switch platform missing"

@@ -11,6 +11,26 @@
           "country": "Country code",
           "region": "Region"
         }
+      },
+      "reconfigure": {
+        "title": "Update YI Home credentials",
+        "description": "Enter the current YI Home account and password. They are validated and stored by the YI Home App; the password is not stored in the Home Assistant config entry.",
+        "data": {
+          "account": "Account",
+          "password": "Password",
+          "country": "Country code",
+          "region": "Region"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect your YI Home account",
+        "description": "YI rejected the saved credentials. Enter the current account and password. The password is sent directly to the YI Home App and is not stored in the Home Assistant config entry.",
+        "data": {
+          "account": "Account",
+          "password": "Password",
+          "country": "Country code",
+          "region": "Region"
+        }
       }
     },
     "error": {

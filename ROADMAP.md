@@ -140,6 +140,8 @@ Foundation already live:
 - Hass.io/Supervisor discovery Config Flow;
 - account form and authenticated handoff;
 - Config Entry without YI password;
+- manual credential replacement through the Home Assistant Reconfigure flow
+  (source complete; HA OS deployment validation pending);
 - coordinator-driven camera inventory/status;
 - 7 camera Devices with Online, Runtime status and Stream control entities;
 - **Camera/live-view entities backed by the App-owned media path: PASS for tested cameras with a working upstream live source**;
@@ -153,7 +155,7 @@ Live-view validation:
 
 Next implementation target:
 
-- polished diagnostics and reauthentication UX;
+- automatic reauthentication trigger from App secret-safe state and polished diagnostics;
 - dynamic camera additions where practical;
 - removed-camera runtime cleanup;
 - final secret-redaction tests.
