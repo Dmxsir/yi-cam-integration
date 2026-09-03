@@ -53,7 +53,7 @@ YI camera
 
 The App owns the PPPP/TNP session. Home Assistant and Frigate consume the App-owned RTSP stream and do not create independent YI sessions.
 
-## Credential replacement UI — SOURCE COMPLETE, DEPLOYMENT PENDING
+## Credential replacement UI — DEPLOYED, UI CAPABILITY VERIFIED
 
 Source state:
 
@@ -69,8 +69,15 @@ Source state:
 
 Deployment state:
 
-- not yet copied to `/config/custom_components/yi_home` on HA OS;
-- the running Integration therefore still reports no reconfigure support.
+- commit `dc49c3f` is pushed to `phase-3-linux-pppp`;
+- `config_flow.py`, `strings.json` and `translations/he.json` were copied to
+  `/config/custom_components/yi_home` on HA OS;
+- the previous three files are backed up under
+  `/config/.codex-backups/yi_home-dc49c3f`;
+- Home Assistant configuration validation passed and Core restarted cleanly;
+- the live Config Entry is loaded and reports `supports_reconfigure=true`;
+- no YI account or password was submitted during deployment, so recovery of
+  camera discovery is still pending the user's UI submission.
 
 Evidence:
 
@@ -80,6 +87,10 @@ English/Hebrew translation JSON parse: PASS
 Integration smoke gates through account-update translations and secret scan: PASS
 Windows tar bundle: PASS (45,592 bytes)
 bundle SHA-256: 2440b42243db3bf58123574dec0ba91a4de51b8b9f2a816f0e11320e7a3ddff0
+HA configuration check before restart: PASS
+live Integration state after restart: loaded
+live Integration supports_reconfigure: true
+deployed source checksums match commit dc49c3f: PASS
 ```
 
 The broad Python suite was also sampled: unrelated existing failures remain on
@@ -95,11 +106,11 @@ Conclusion:
 
 Next step:
 
-1. commit and push this source on `phase-3-linux-pppp`;
-2. deploy `custom_components/yi_home` to HA OS and restart Home Assistant;
-3. confirm the live entry reports reconfigure support;
-4. use the UI form to submit the current YI account/password and verify camera
-   discovery recovers.
+1. use **Settings -> Devices & services -> YI Home -> Reconfigure** to submit
+   the current YI account and password;
+2. confirm the App reports `account_configured=true` and successful discovery;
+3. verify camera entities recover from `unavailable` without reinstalling the
+   App or Integration.
 
 ## Phase 6G
 

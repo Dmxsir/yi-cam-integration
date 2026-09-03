@@ -141,7 +141,7 @@ Foundation already live:
 - account form and authenticated handoff;
 - Config Entry without YI password;
 - manual credential replacement through the Home Assistant Reconfigure flow
-  (source complete; HA OS deployment validation pending);
+  (source and HA OS deployment complete; live credential submission pending);
 - coordinator-driven camera inventory/status;
 - 7 camera Devices with Online, Runtime status and Stream control entities;
 - **Camera/live-view entities backed by the App-owned media path: PASS for tested cameras with a working upstream live source**;
