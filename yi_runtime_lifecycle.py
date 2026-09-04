@@ -25,6 +25,28 @@ from urllib.parse import quote
 from yi_stream_identity import media_stream_name, normalize_stable_id
 
 
+_SAFE_PROBE_PREFIXES = (
+    "[phase3g-relay] native_record_probe=",
+    "[phase3g-relay] native_video_payload_probe=",
+)
+
+
+def _runtime_probe_lines(path: Path, offset: int) -> list[str]:
+    """Read only the relay's fixed, secret-safe probe records."""
+    try:
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            return [
+                line
+                for raw in stream
+                if (line := raw.decode("utf-8", errors="replace").rstrip()).startswith(
+                    _SAFE_PROBE_PREFIXES
+                )
+            ]
+    except OSError:
+        return []
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -301,8 +323,10 @@ class _CameraRuntimeController:
                 self._set_state("starting" if first_launch else "restarting")
                 self.config.state_dir.mkdir(parents=True, exist_ok=True)
                 pump_thread: threading.Thread | None = None
+                generation_log_offset = 0
                 try:
                     log_stream = self.log_path.open("ab", buffering=0)
+                    generation_log_offset = log_stream.tell()
                     try:
                         process = subprocess.Popen(
                             self._command(),
@@ -376,6 +400,12 @@ class _CameraRuntimeController:
                     pump_thread.join(timeout=1.0)
 
                 log_stream.close()
+                for probe_line in _runtime_probe_lines(self.log_path, generation_log_offset):
+                    print(
+                        f"[yi-runtime-diagnostic] camera={self.stable_id[:12]} {probe_line}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 runtime_seconds = time.monotonic() - launched_mono
                 with self.lock:
                     self.process = None

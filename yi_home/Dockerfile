@@ -23,7 +23,7 @@ RUN apk add --no-cache \
       xz \
     && curl -fsSL \
       -o /tmp/ffmpeg-static.tar.xz \
-      "https://www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-${FFMPEG_VERSION}-amd64-static.tar.xz" \
+      "https://software.frc971.org/Build-Dependencies/www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-${FFMPEG_VERSION}-amd64-static.tar.xz" \
     && echo "${FFMPEG_SHA256}  /tmp/ffmpeg-static.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/ffmpeg-static.tar.xz -C /tmp \
     && install -m 0755 \

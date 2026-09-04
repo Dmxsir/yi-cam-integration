@@ -59,6 +59,27 @@ class _FakeHTTPConnection:
 
 
 class YiRuntimeLifecyclePublisherTests(unittest.TestCase):
+    def test_runtime_probe_lines_return_only_current_safe_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "camera.log"
+            path.write_text("[phase3g-relay] native_record_probe=old\n", encoding="utf-8")
+            offset = path.stat().st_size
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write("secret native_record_probe=do-not-forward\n")
+                stream.write("[phase3g-relay] native_record_probe=true; payload_logged=false\n")
+                stream.write("[phase3g-relay] native_video_payload_probe=true; nal_types=7,8,5\n")
+
+            lines = lifecycle._runtime_probe_lines(path, offset)
+
+        self.assertEqual(
+            lines,
+            [
+                "[phase3g-relay] native_record_probe=true; payload_logged=false",
+                "[phase3g-relay] native_video_payload_probe=true; nal_types=7,8,5",
+            ],
+        )
+        self.assertNotIn("secret", "".join(lines))
+
     def test_mpegts_is_prebuffered_before_http_ingest_is_opened(self) -> None:
         events: list[str] = []
         _FakeHTTPConnection.events = events

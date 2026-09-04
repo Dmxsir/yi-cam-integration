@@ -1,6 +1,6 @@
 # YI Camera Connect / YI RTSP — Project Checkpoint
 
-_Last updated: 2026-09-03_
+_Last updated: 2026-09-04_
 _Branch: `phase-3-linux-pppp`  
 _Repository: `Dmxsir/yi-cam-integration`
 
@@ -52,6 +52,94 @@ YI camera
 ```
 
 The App owns the PPPP/TNP session. Home Assistant and Frigate consume the App-owned RTSP stream and do not create independent YI sessions.
+
+## zforce native-record probe — DEPLOYED AND COLLECTED
+
+Source state:
+
+- `yi_native_av_relay.py` logs only the first three secret-safe native media
+  records per channel: YAV1 framing, TNP header fields, codec/flags,
+  sequence/delta, timestamp/delta, dimensions and loss counters;
+- video records also log frame type, Annex-B framing and NAL types without
+  logging payload bytes;
+- `yi_runtime_lifecycle.py` forwards only those exact fixed probe prefixes
+  from the per-camera runtime log after a generation exits;
+- focused tests cover metadata accuracy, wrap-safe deltas and the allow-listed
+  log bridge;
+- App version advanced from `0.1.0` to `0.1.1` so the Supervisor cannot retain
+  a stale same-version image;
+- the John Van Sickle URL currently serves a 7 KB JavaScript challenge instead
+  of the archive. `yi_home/Dockerfile` now uses the frc971 archive mirror; the
+  downloaded mirror artifact matched the original pinned SHA-256 exactly:
+  `28268bf402f1083833ea269331587f60a242848880073be8016501d864bd07a5`.
+
+Deployment state:
+
+- deployed source SHA-256 values match the repository working tree:
+  `yi_native_av_relay.py=644dc013...cb17`,
+  `yi_runtime_lifecycle.py=40cfbc0f...484c`,
+  `Dockerfile=7c41f197...7cb2`, and `config.yaml=f6050029...1681`;
+- backups are under `/config/.codex-backups/yi-home-native-probe-20260903`
+  and `/config/.codex-backups/yi-home-version-20260904`;
+- `/addons/yi_home.pre_baseline` duplicated `slug: yi_home` with stale source.
+  Its `config.yaml` was reversibly renamed to `config.yaml.disabled` so only
+  `/addons/yi_home` is registered;
+- Supervisor was restarted to rescan the local App, then update/install built
+  and started `local_yi_home` version `0.1.1` successfully;
+- live final state: zforce OFF/stopped as intended; pool and PTZ ON/running,
+  both publisher-attached with restart count 0 after the App update.
+
+Evidence:
+
+```text
+focused new tests: PASS (2/2)
+Python compile: PASS
+broader focused modules: 6 PASS, 1 known Windows POSIX-mode assertion failure
+App version/state: 0.1.1 / started / update_available=false
+
+zforce controlled 0.1.1 generation:
+restart_count=0
+publisher_attached=true
+published_bytes before stop=7,247,400
+
+channel 3 P-video:
+sequence 2 -> 3 -> 4 (delta 1)
+timestamp_ms deltas 36 ms, 51 ms
+Annex-B NAL type 1
+
+channel 1 AAC audio:
+sequence 1 -> 2 -> 3 (delta 1)
+timestamp_ms deltas 61 ms, 71 ms
+
+channel 2 I-video:
+sequence 1 -> 41 -> 81 (delta 40)
+timestamp deltas 2 s; timestamp_ms deltas 2003 ms
+Annex-B NAL types 7,8,5 (SPS/PPS/IDR)
+
+all sampled records:
+TNP version 2; codec video=78/audio=138; 2304x1296;
+out_loss=0; in_loss=0; payload_logged=false
+```
+
+The final user-requested stop ended the child generation with exit 81 after it
+had already published successfully; treat this as stop-path evidence, not a
+spontaneous stability failure.
+
+Conclusion:
+
+- zforce's initial native YAV1/TNP framing, sequence progression and timestamps
+  are coherent; the historical restart loop is not explained by malformed
+  initial headers, sequence jumps or timestamp corruption;
+- the next investigation boundary remains the long-running worker/QEMU read
+  path and FFmpeg pipe/backpressure stages after successful startup.
+
+Next step:
+
+1. keep zforce OFF and pool/PTZ ON;
+2. for the next zforce soak, correlate the last safe stage and worker record
+   totals at each spontaneous exit rather than adding more header parsing;
+3. fix the stop path separately if exit 81 on an explicit OFF action needs to
+   be normalized to a clean administrative exit.
 
 ## Credential replacement UI — DEPLOYED, UI CAPABILITY VERIFIED
 

@@ -1,5 +1,5 @@
 name: "YI Home"
-version: "0.1.0"
+version: "0.1.1"
 slug: "yi_home"
 description: "Native YI Home camera runtime for Home Assistant"
 url: "https://github.com/Dmxsir/yi-cam-integration"

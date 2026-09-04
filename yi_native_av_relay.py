@@ -41,6 +41,7 @@ AAC_SAMPLE_RATE = 16000
 AAC_SAMPLES_PER_FRAME = 1024
 AUDIO_TICKS = MPEGTS_TIME_BASE * AAC_SAMPLES_PER_FRAME // AAC_SAMPLE_RATE
 MAX_RECORD = 2 * 1024 * 1024 + 32
+NATIVE_RECORD_PROBE_LIMIT = 3
 STREAM_MAGIC = b"YAV1"
 CHILD_STATE_MARKER_ENV = "YI_PHASE3_CHILD_STATE_MARKER"
 
@@ -112,6 +113,41 @@ def read_exact(stream: BinaryIO, length: int) -> bytes:
 def signed_delta32(current: int, base: int) -> int:
     value = (current - base) & 0xFFFFFFFF
     return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _format_native_record_probe(
+    channel: int,
+    raw: bytes,
+    channel_index: int,
+    previous: tuple[int, int, int] | None,
+) -> tuple[str, tuple[int, int, int]]:
+    frame = raw[8:32]
+    sequence = int.from_bytes(frame[6:8], "big")
+    timestamp = int.from_bytes(frame[12:16], "big")
+    timestamp_ms = int.from_bytes(frame[20:24], "big")
+    current = (sequence, timestamp, timestamp_ms)
+    if previous is None:
+        sequence_delta: int | str = "first"
+        timestamp_delta: int | str = "first"
+        timestamp_ms_delta: int | str = "first"
+    else:
+        sequence_delta = (sequence - previous[0]) & 0xFFFF
+        timestamp_delta = signed_delta32(timestamp, previous[1])
+        timestamp_ms_delta = signed_delta32(timestamp_ms, previous[2])
+    return (
+        "native_record_probe=true; "
+        f"channel={channel}; channel_index={channel_index}; "
+        f"native_header=YAV1/{channel}/000000/{len(raw)}; "
+        f"tnp_version={raw[0]}; io_type={raw[1]}; "
+        f"declared_size={int.from_bytes(raw[4:8], 'big')}; "
+        f"codec_id={int.from_bytes(frame[0:2], 'big')}; flags=0x{frame[2]:02x}; "
+        f"sequence={sequence}; sequence_delta={sequence_delta}; "
+        f"timestamp={timestamp}; timestamp_delta={timestamp_delta}; "
+        f"timestamp_ms={timestamp_ms}; timestamp_ms_delta={timestamp_ms_delta}; "
+        f"dimensions={int.from_bytes(frame[8:10], 'big')}x{int.from_bytes(frame[10:12], 'big')}; "
+        f"live_flag={frame[3]}; use_count={frame[5]}; "
+        f"out_loss={frame[18]}; in_loss={frame[19]}"
+    ), current
 
 
 def decrypt_audio_unit(raw: bytes, password: str) -> tuple[int, bytes, dict[str, int]]:
@@ -478,6 +514,8 @@ def main() -> int:
         video_frames = 0
         audio_frames = 0
         audio_validation_drops = 0
+        probe_counts = {1: 0, 2: 0, 3: 0}
+        probe_previous: dict[int, tuple[int, int, int]] = {}
 
         def start_mux_if_ready() -> None:
             nonlocal mux, video_pipe, audio_pipe, output_file
@@ -506,6 +544,10 @@ def main() -> int:
             log("mpegts_mux=STARTED")
 
         try:
+            log(
+                "native_record_probe=armed; "
+                f"per_channel_limit={NATIVE_RECORD_PROBE_LIMIT}; payload_logged=false"
+            )
             while True:
                 header = child.stdout.read(12)
                 if not header:
@@ -519,6 +561,16 @@ def main() -> int:
                 if channel not in (1, 2, 3) or length < 32 or length > MAX_RECORD:
                     raise RuntimeError("invalid native media record")
                 raw = read_exact(child.stdout, length)
+                probe_this_record = probe_counts[channel] < NATIVE_RECORD_PROBE_LIMIT
+                if probe_this_record:
+                    probe_counts[channel] += 1
+                    probe_line, probe_previous[channel] = _format_native_record_probe(
+                        channel,
+                        raw,
+                        probe_counts[channel],
+                        probe_previous.get(channel),
+                    )
+                    log(probe_line)
 
                 if channel == 1:
                     try:
@@ -555,6 +607,15 @@ def main() -> int:
                     continue
 
                 frame = yi_live_relay._decode_video_unit(channel, raw, material.password, material.encrypted)
+                if probe_this_record:
+                    nal_types = ",".join(str(value) for value in frame["nal_unit_types"]) or "none"
+                    log(
+                        "native_video_payload_probe=true; "
+                        f"channel={channel}; channel_index={probe_counts[channel]}; "
+                        f"sequence={frame['sequence']}; frame_type={frame['frame_type']}; "
+                        f"framing={frame['framing']}; nal_types={nal_types}; "
+                        f"payload_bytes={len(frame['output_payload'])}; payload_logged=false"
+                    )
                 for ready in reorder.push(frame):
                     timestamp_ms = int(ready["timestamp_ms"])
                     if first_video_ts is None:
