@@ -21,6 +21,7 @@ echo "image_name=$IMAGE"
 "$PYTHON" -m py_compile "$ROOT/tools/prepare_ha_app_context.py"
 "$PYTHON" "$ROOT/tools/prepare_ha_app_context.py"
 echo "app_context_prepare=PASS"
+echo "dockerfile_vendor_requirement_scan=PASS"
 
 docker build --pull \
   --build-arg BUILD_VERSION=0.1.0 \

@@ -54,7 +54,6 @@ RUN chmod 0755 /run.sh \
     && test -f /opt/yi-home/app/yi_addon_service.py \
     && test -x /opt/yi-home/runtime/bionic-root/system/bin/linker64 \
     && test -x /opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/android_pppp_online_probe \
-    && test -f /opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/libPPPP_API.so \
     && test -x /usr/local/bin/ffmpeg \
     && test -x /usr/local/bin/ffprobe \
     && python3 -m py_compile /opt/yi-home/app/*.py

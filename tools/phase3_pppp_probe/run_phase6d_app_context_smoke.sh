@@ -59,7 +59,14 @@ fi
 if ! grep -q '^discovery:' "$APP_DIR/config.yaml" || ! grep -q '  - yi_home' "$APP_DIR/config.yaml"; then
   fail "Supervisor discovery service is not declared"
 fi
-if ! grep -q '^map:' "$APP_DIR/config.yaml" || ! grep -q '  - share:ro' "$APP_DIR/config.yaml"; then
+if ! awk '
+  /^map:[[:space:]]*$/ { in_map=1; next }
+  in_map && /^[^[:space:]]/ { in_map=0 }
+  in_map && /^[[:space:]]*-[[:space:]]*share:ro[[:space:]]*$/ { found=1 }
+  in_map && /^[[:space:]]*-[[:space:]]*type:[[:space:]]*share[[:space:]]*$/ { share_dict=1; next }
+  in_map && share_dict && /^[[:space:]]*read_only:[[:space:]]*true[[:space:]]*$/ { found=1 }
+  END { exit !found }
+' "$APP_DIR/config.yaml"; then
   fail "read-only /share import mapping is not declared"
 fi
 echo "app_security_config=PASS"

@@ -113,6 +113,20 @@ def ensure_no_vendor_artifacts(app_dir: Path) -> None:
         )
 
 
+def ensure_dockerfile_has_no_vendor_requirements(dockerfile: Path) -> None:
+    """Reject build-time dependencies on user-supplied proprietary artifacts."""
+    try:
+        contents = dockerfile.read_text(encoding="utf-8").casefold()
+    except OSError as exc:
+        raise SystemExit(f"App Dockerfile is not readable: {dockerfile}") from exc
+    required = sorted(name for name in VENDOR_ARTIFACT_NAMES if name in contents)
+    if required:
+        raise SystemExit(
+            "Dockerfile must not require proprietary vendor artifacts: "
+            + ", ".join(required)
+        )
+
+
 def exclude_vendor_artifacts(_directory: str, names: list[str]) -> set[str]:
     return {name for name in names if name.casefold() in VENDOR_ARTIFACT_NAMES}
 
@@ -134,6 +148,7 @@ def ensure_runtime(runtime: Path) -> None:
 def prepare_context(runtime: Path, app_dir: Path) -> tuple[Path, int]:
     rootfs = app_dir / "rootfs"
     ensure_runtime(runtime)
+    ensure_dockerfile_has_no_vendor_requirements(app_dir / "Dockerfile")
     reset_rootfs(rootfs)
 
     app_destination = rootfs / "opt/yi-home/app"
