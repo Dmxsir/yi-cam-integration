@@ -3,9 +3,9 @@
 
 The Home Assistant App folder is its Docker build context, so development-only
 artifacts under .analysis cannot be referenced directly by the Dockerfile. This
-preparer copies only project Python sources and the already-proven Bionic/native
-runtime into yi_home/rootfs. It intentionally never copies .env files, account
-credentials or other home-directory configuration.
+preparer copies project Python sources and the redistributable pieces of the
+already-proven Bionic/native runtime into yi_home/rootfs. It never copies the
+YI vendor library, .env files, credentials or other home-directory state.
 """
 
 from __future__ import annotations
@@ -23,6 +23,11 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME = ROOT / ".analysis" / "phase3" / "bionic-root"
 DEFAULT_APP_DIR = ROOT / "yi_home"
+VENDOR_LIBRARY_NAME = "libPPPP_API.so"
+VENDOR_APK_NAME = "yi-home.apk"
+VENDOR_ARTIFACT_NAMES = frozenset(
+    {VENDOR_LIBRARY_NAME.casefold(), VENDOR_APK_NAME.casefold()}
+)
 
 
 def sha256(path: Path) -> str:
@@ -87,31 +92,46 @@ def iter_forbidden_paths(root: Path) -> Iterable[Path]:
             yield path
 
 
+def iter_vendor_libraries(root: Path) -> Iterable[Path]:
+    for path in root.rglob("*"):
+        if path.name.casefold() == VENDOR_LIBRARY_NAME.casefold():
+            yield path
+
+
+def iter_vendor_artifacts(root: Path) -> Iterable[Path]:
+    for path in root.rglob("*"):
+        if path.name.casefold() in VENDOR_ARTIFACT_NAMES:
+            yield path
+
+
+def ensure_no_vendor_artifacts(app_dir: Path) -> None:
+    found = list(iter_vendor_artifacts(app_dir))
+    if found:
+        raise SystemExit(
+            "proprietary vendor artifact present in Docker build context: "
+            + ", ".join(str(path) for path in found)
+        )
+
+
+def exclude_vendor_artifacts(_directory: str, names: list[str]) -> set[str]:
+    return {name for name in names if name.casefold() in VENDOR_ARTIFACT_NAMES}
+
+
 def ensure_runtime(runtime: Path) -> None:
     required = [
         runtime / "system/bin/linker64",
         runtime / "system/lib64/libc.so",
         runtime / "system/lib64/libdl.so",
         runtime / "data/local/tmp/yi-phase3g",
+        runtime / "data/local/tmp/yi-phase3g/android_pppp_av_stream",
         runtime / "data/local/tmp/yi-online-status/android_pppp_online_probe",
-        runtime / "data/local/tmp/yi-online-status/libPPPP_API.so",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise SystemExit("required proven runtime artifact missing: " + ", ".join(missing))
-    worker_dir = runtime / "data/local/tmp/yi-phase3g"
-    if not any(path.is_file() for path in worker_dir.iterdir()):
-        raise SystemExit("Phase 3G worker directory is empty")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare yi_home Docker build context")
-    parser.add_argument("--runtime-root", type=Path, default=DEFAULT_RUNTIME)
-    parser.add_argument("--app-dir", type=Path, default=DEFAULT_APP_DIR)
-    args = parser.parse_args()
-
-    runtime = args.runtime_root.expanduser().resolve()
-    app_dir = args.app_dir.expanduser().resolve()
+def prepare_context(runtime: Path, app_dir: Path) -> tuple[Path, int]:
     rootfs = app_dir / "rootfs"
     ensure_runtime(runtime)
     reset_rootfs(rootfs)
@@ -119,7 +139,12 @@ def main() -> int:
     app_destination = rootfs / "opt/yi-home/app"
     runtime_destination = rootfs / "opt/yi-home/runtime/bionic-root"
     copied_sources = copy_project_sources(app_destination)
-    shutil.copytree(runtime, runtime_destination, symlinks=True)
+    shutil.copytree(
+        runtime,
+        runtime_destination,
+        symlinks=True,
+        ignore=exclude_vendor_artifacts,
+    )
 
     forbidden = list(iter_forbidden_paths(rootfs))
     if forbidden:
@@ -127,6 +152,8 @@ def main() -> int:
             if path.is_file():
                 path.unlink()
         raise SystemExit("forbidden secret/state file was present in staged App context")
+
+    ensure_no_vendor_artifacts(app_dir)
 
     # Preserve execute bits on the native worker and Android linker even when a
     # source filesystem has restrictive defaults.
@@ -140,13 +167,13 @@ def main() -> int:
         "android_linker64": runtime_destination / "system/bin/linker64",
         "bionic_libc": runtime_destination / "system/lib64/libc.so",
         "online_worker": runtime_destination / "data/local/tmp/yi-online-status/android_pppp_online_probe",
-        "online_pppp_library": runtime_destination / "data/local/tmp/yi-online-status/libPPPP_API.so",
     }
     manifest = {
         "schema_version": 1,
         "source_commit": git_head(ROOT),
         "architecture": "amd64-host/aarch64-guest",
         "python_source_count": len(copied_sources),
+        "vendor_library_packaged": False,
         "critical_artifacts": {
             name: {
                 "path": str(path.relative_to(rootfs)),
@@ -162,11 +189,25 @@ def main() -> int:
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(manifest_path, 0o644)
 
+    return manifest_path, len(copied_sources)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Prepare yi_home Docker build context")
+    parser.add_argument("--runtime-root", type=Path, default=DEFAULT_RUNTIME)
+    parser.add_argument("--app-dir", type=Path, default=DEFAULT_APP_DIR)
+    args = parser.parse_args()
+
+    runtime = args.runtime_root.expanduser().resolve()
+    app_dir = args.app_dir.expanduser().resolve()
+    manifest_path, copied_source_count = prepare_context(runtime, app_dir)
+
     print(f"app_context={app_dir}")
     print(f"runtime_source={runtime}")
-    print(f"python_source_count={len(copied_sources)}")
+    print(f"python_source_count={copied_source_count}")
     print(f"runtime_manifest={manifest_path}")
     print("secret_files_copied=false")
+    print("vendor_library_copied=false")
     print("PHASE6D_APP_CONTEXT_PREPARE=PASS")
     return 0
 
