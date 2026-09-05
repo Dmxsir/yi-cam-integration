@@ -115,6 +115,28 @@ full_access=false
 docker_api=false
 ```
 
+Issue #2 vendor bootstrap was also validated end to end on real HAOS at
+`81dd900`:
+
+```text
+Issue #2 HAOS bootstrap validation: PASS
+Issue #2 persistence validation: PASS
+Issue #2 end-to-end media validation: PASS
+```
+
+The first start imported the official user-supplied APK from
+`/share/yi_rtsp/yi-home.apk`; an App restart reused the validated private
+`/data/vendor/libPPPP_API.so`, the backend and five managed runtimes recovered,
+HA discovery republished, and all camera live streams were visible again. The
+required Local App deployment order is `copy local App` → `ha store reload` →
+`ha apps rebuild local_yi_home` → `ha apps start local_yi_home` because rebuild
+alone can reuse stale Supervisor Local App metadata.
+
+No APK or `libPPPP_API.so` is tracked or packaged, `/share` remains read-only,
+and no protected PPPP/media/runtime behavior changed. The stale Dockerfile
+assertion that required the private library inside the image was a packaging
+bug fixed in `81dd900`.
+
 Exit gate: PASS.
 
 ### Phase 6D.2 — Configuration, storage and secrets — COMPLETE
