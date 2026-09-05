@@ -41,17 +41,6 @@ class _FakeLifecycle:
         }
 
 
-class _FailingCameraManager:
-    def __init__(self, *, timeout: float) -> None:
-        self.timeout = timeout
-
-    def discover(self, *, fetch_tnp: bool = True):
-        raise TimeoutError("simulated cloud outage")
-
-    def close(self) -> None:
-        return
-
-
 class RuntimePolicyStoreTests(unittest.TestCase):
     def test_round_trip_and_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -138,7 +127,7 @@ class RuntimePolicyStoreTests(unittest.TestCase):
             store.set_desired_running(CAMERA_A, True)
             backend = YiPersistentAddonBackend(runtime_policy=store, lifecycle=_FakeLifecycle())
 
-            with patch("yi_persistent_backend.YiCameraManager", _FailingCameraManager):
+            with patch.object(backend.cloud_session, "discover", side_effect=TimeoutError()):
                 with self.assertRaises(TimeoutError):
                     backend.discover(fetch_tnp=True)
 

@@ -28,6 +28,7 @@ from typing import Any, BinaryIO, Callable
 
 import yi_camera_runtime
 import yi_native_av_relay as relay
+from yi_cloud_session import request_runtime_material
 
 
 EXIT_NATIVE_WORKER = 81
@@ -329,6 +330,7 @@ def _classify_relay_exception(exc: Exception) -> tuple[int, str]:
 def main() -> int:
     selector = argparse.ArgumentParser(add_help=False)
     selector.add_argument("--stable-id", required=True)
+    selector.add_argument("--material-socket", type=Path)
     selected, remaining = selector.parse_known_args()
 
     stable_id = selected.stable_id.strip()
@@ -336,10 +338,17 @@ def main() -> int:
         raise SystemExit("--stable-id must not be empty")
 
     def fresh_stable_target(timeout: float) -> tuple[Any, dict[str, Any]]:
-        material, descriptor = yi_camera_runtime.runtime_material_for(
-            stable_id,
-            timeout=timeout,
-        )
+        if selected.material_socket is not None:
+            material, descriptor = request_runtime_material(
+                selected.material_socket,
+                stable_id,
+                timeout=max(12.0, timeout * 3.0 + 2.0),
+            )
+        else:
+            material, descriptor = yi_camera_runtime.runtime_material_for(
+                stable_id,
+                timeout=timeout,
+            )
         safe = descriptor.safe_dict()
         return material, {
             "selected_camera": descriptor.name,
@@ -466,6 +475,8 @@ def main() -> int:
         relay.decrypt_audio_unit = diagnostic_decrypt_audio
         relay.start_ffmpeg = diagnostic_start_ffmpeg
         relay.yi_live_relay._decode_video_unit = diagnostic_decode_video
+        if selected.material_socket is not None:
+            remaining = ["--skip-env-load", *remaining]
         sys.argv = [original_argv[0], *remaining]
         set_stage("native_header_read")
         try:

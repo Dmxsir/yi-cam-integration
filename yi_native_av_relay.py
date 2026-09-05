@@ -396,6 +396,7 @@ def validate_ts(path: Path, ffprobe: str) -> bool:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Phoneless native YI H264+AAC MPEG-TS relay")
     p.add_argument("--env-file", type=Path, default=ROOT / ".env.local")
+    p.add_argument("--skip-env-load", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--runtime", type=Path, default=ROOT / ".analysis/phase3/bionic-root")
     p.add_argument("--worker-dir", type=Path, default=ROOT / ".analysis/phase3/bionic-root/data/local/tmp/yi-phase3g")
     p.add_argument("--qemu", default="qemu-aarch64")
@@ -420,14 +421,15 @@ def main() -> int:
     args = parser().parse_args()
     if args.stdout == bool(args.output):
         raise SystemExit("choose exactly one of --stdout or --output")
-    if not args.env_file.is_file():
+    if not args.skip_env_load and not args.env_file.is_file():
         raise SystemExit(".env.local is missing")
     worker = args.worker_dir / "android_pppp_av_stream"
     library = args.worker_dir / "libPPPP_API.so"
     if not worker.is_file() or not library.is_file():
         raise SystemExit("Phase 3G worker is not built")
 
-    oracle.load_env_file(args.env_file)
+    if not args.skip_env_load:
+        oracle.load_env_file(args.env_file)
     material: oracle.CameraMaterial | None = None
     child: subprocess.Popen[bytes] | None = None
     mux: Any | None = None

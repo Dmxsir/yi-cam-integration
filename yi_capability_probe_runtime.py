@@ -28,7 +28,7 @@ from typing import Any, BinaryIO
 
 from yi_camera_runtime import PROVEN_PROFILE
 from yi_capability_cache import CapabilityRecord, YiCapabilityCache
-from yi_runtime_lifecycle import RuntimeLifecycleConfig
+from yi_runtime_lifecycle import RuntimeLifecycleConfig, runtime_child_environment
 
 STABLE_ID_RE = re.compile(r"^[0-9a-f]{20}$")
 MIN_STREAM_BYTES = 64 * 1024
@@ -160,13 +160,17 @@ class YiCapabilityProbe:
 
     def _relay_command(self, stable_id: str) -> list[str]:
         cfg = self.config
-        return [
+        command = [
             cfg.python,
             str(cfg.stable_relay),
             "--stable-id",
             stable_id,
-            "--env-file",
-            str(cfg.env_file),
+        ]
+        if cfg.material_socket is not None:
+            command.extend(("--material-socket", str(cfg.material_socket)))
+        else:
+            command.extend(("--env-file", str(cfg.env_file)))
+        command.extend([
             "--runtime",
             str(cfg.runtime_root),
             "--worker-dir",
@@ -178,7 +182,8 @@ class YiCapabilityProbe:
             "--ffprobe",
             cfg.ffprobe,
             "--stdout",
-        ]
+        ])
+        return command
 
     def _kill_group(self, process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
         try:
@@ -280,6 +285,7 @@ class YiCapabilityProbe:
                     stdout=media_stream,
                     stderr=log_stream,
                     start_new_session=True,
+                    env=runtime_child_environment(),
                 )
             except OSError as exc:
                 raise CapabilityProbeError(

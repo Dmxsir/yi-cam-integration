@@ -26,8 +26,9 @@ import yi_tnp_oracle as oracle
 from yi_stream_identity import media_stream_name
 
 
-def _required_env(name: str) -> str:
-    value = os.getenv(name)
+def _required_env(name: str, environment: Mapping[str, str] | None = None) -> str:
+    source = os.environ if environment is None else environment
+    value = source.get(name)
     if not value:
         raise RuntimeError(f"Missing required environment variable {name}")
     return value
@@ -63,18 +64,19 @@ class CameraDevice:
 class YiCameraManager:
     """One authenticated YI account session with secret-safe camera inventory."""
 
-    def __init__(self, timeout: float = 10.0) -> None:
+    def __init__(self, timeout: float = 10.0, *, environment: Mapping[str, str] | None = None) -> None:
         self.timeout = timeout
-        self.region = os.getenv("YI_REGION", "eu").casefold()
+        self._environment = dict(os.environ if environment is None else environment)
+        self.region = self._environment.get("YI_REGION", "eu").casefold()
         if self.region not in cloud.GATEWAY_HOSTS:
             raise RuntimeError(f"Unsupported YI_REGION: {self.region!r}")
-        self.country = _required_env("YI_COUNTRY").upper()
+        self.country = _required_env("YI_COUNTRY", self._environment).upper()
         self.host = cloud.GATEWAY_HOSTS[self.region]
         self.headers = cloud.request_headers(
             self.country,
-            _required_env("YI_DEVICE_MODEL"),
-            _required_env("YI_ANDROID_VERSION"),
-            _required_env("YI_LANGUAGE"),
+            _required_env("YI_DEVICE_MODEL", self._environment),
+            _required_env("YI_ANDROID_VERSION", self._environment),
+            _required_env("YI_LANGUAGE", self._environment),
         )
         self._user_id = ""
         self._token = ""
@@ -87,10 +89,19 @@ class YiCameraManager:
         self._user_id = self._token = self._token_secret = ""
         self._cameras.clear()
         self._tnp_cache.clear()
+        self._environment.clear()
 
-    def login_and_list(self) -> None:
-        account = _required_env("YI_ACCOUNT")
-        account_password = _required_env("YI_PASSWORD")
+    @property
+    def authenticated(self) -> bool:
+        return bool(self._user_id and self._token and self._token_secret)
+
+    @property
+    def camera_count(self) -> int:
+        return len(self._cameras)
+
+    def login(self) -> None:
+        account = _required_env("YI_ACCOUNT", self._environment)
+        account_password = _required_env("YI_PASSWORD", self._environment)
         login, diag = cloud.get_json(
             self.host,
             "/v4/users/login",
@@ -98,9 +109,9 @@ class YiCameraManager:
                 self.region,
                 account,
                 account_password,
-                _required_env("YI_DEVICE_BRAND"),
-                _required_env("YI_DEVICE_MODEL"),
-                _required_env("YI_ANDROID_VERSION"),
+                _required_env("YI_DEVICE_BRAND", self._environment),
+                _required_env("YI_DEVICE_MODEL", self._environment),
+                _required_env("YI_ANDROID_VERSION", self._environment),
             ),
             self.headers,
             self.timeout,
@@ -119,6 +130,9 @@ class YiCameraManager:
         self._token = token
         self._token_secret = token_secret
 
+    def refresh_devices(self) -> None:
+        if not self.authenticated:
+            raise RuntimeError("A YI cloud session is required before camera discovery")
         devices, diag = cloud.get_json(
             self.host,
             "/v4/devices/list",
@@ -133,6 +147,7 @@ class YiCameraManager:
 
         seen: set[str] = set()
         self._cameras.clear()
+        self._tnp_cache.clear()
         for item in cameras:
             uid = item.get("uid")
             if not isinstance(uid, str) or not uid:
@@ -142,6 +157,10 @@ class YiCameraManager:
                 raise RuntimeError("Stable camera identifier collision")
             seen.add(stable)
             self._cameras[stable] = dict(item)
+
+    def login_and_list(self) -> None:
+        self.login()
+        self.refresh_devices()
 
     def _tnp_info(self, stable_id: str) -> dict[str, Any]:
         cached = self._tnp_cache.get(stable_id)
@@ -224,7 +243,11 @@ class YiCameraManager:
                         for value in (did, init, license_value, device_key)
                     )
                     tnp_status = "ready" if tnp_ready else "missing_fields"
-                except (cloud.YiCloudError, RuntimeError):
+                except cloud.YiCloudError as exc:
+                    if exc.category == "session_expired":
+                        raise
+                    tnp_status = "device_info_failed"
+                except RuntimeError:
                     tnp_status = "device_info_failed"
 
         probe_candidate = p2p_type == 2 and credential_usable and (tnp_ready if fetch_tnp else True)
@@ -246,9 +269,11 @@ class YiCameraManager:
             probe_candidate=probe_candidate,
         )
 
-    def discover(self, *, fetch_tnp: bool = False) -> list[CameraDevice]:
-        if not self._cameras:
-            self.login_and_list()
+    def discover(self, *, fetch_tnp: bool = False, refresh: bool = False) -> list[CameraDevice]:
+        if not self.authenticated:
+            self.login()
+        if refresh or not self._cameras:
+            self.refresh_devices()
         return [self._device(stable_id, fetch_tnp=fetch_tnp) for stable_id in self._cameras]
 
     def material_for(self, stable_id: str) -> oracle.CameraMaterial:

@@ -7,6 +7,7 @@ profile yi_home flags=(attach_disconnected,mediate_deleted) {
   network inet dgram,
   network inet6 stream,
   network inet6 dgram,
+  network unix stream,
 
   file,
   signal (send,receive) set=(kill,term,int,hup,cont,stop),

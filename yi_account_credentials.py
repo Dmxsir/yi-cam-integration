@@ -13,9 +13,12 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import yi_cloud_probe as cloud
+
+if TYPE_CHECKING:
+    from yi_cloud_session import YiCloudSession
 
 
 ENV_KEYS = (
@@ -243,11 +246,32 @@ class YiAccountCredentialStore:
         for key, value in credentials.env().items():
             os.environ[key] = value
 
-    def configure(self, payload: Mapping[str, Any], *, timeout: float = 10.0) -> dict[str, Any]:
+    def configure(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        timeout: float = 10.0,
+        cloud_session: "YiCloudSession | None" = None,
+    ) -> dict[str, Any]:
         credentials = YiAccountCredentials.from_payload(payload)
-        camera_count = self._validate_live(credentials, timeout)
-        self._persist(credentials)
-        self._apply(credentials)
+        if cloud_session is None:
+            camera_count = self._validate_live(credentials, timeout)
+            self._persist(credentials)
+            self._apply(credentials)
+        else:
+            def commit() -> None:
+                self._persist(credentials)
+                self._apply(credentials)
+
+            try:
+                camera_count = cloud_session.replace_credentials(credentials.env(), commit)
+            except cloud.YiCloudError as exc:
+                raise YiAccountCredentialError(exc.category, exc.safe_message) from exc
+            except RuntimeError as exc:
+                raise YiAccountCredentialError(
+                    "unexpected_response_schema",
+                    "YI returned an incomplete account or camera response.",
+                ) from exc
         return {
             "ok": True,
             **credentials.safe_status(camera_count=camera_count),

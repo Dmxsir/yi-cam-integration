@@ -1,6 +1,6 @@
 # YI Camera Connect / YI RTSP — Project Checkpoint
 
-_Last updated: 2026-09-04_
+_Last updated: 2026-09-05_
 _Branch: `phase-3-linux-pppp`  
 _Repository: `Dmxsir/yi-cam-integration`
 
@@ -52,6 +52,129 @@ YI camera
 ```
 
 The App owns the PPPP/TNP session. Home Assistant and Frigate consume the App-owned RTSP stream and do not create independent YI sessions.
+
+## App-owned YI cloud session — IMPLEMENTED, NOT DEPLOYED
+
+Root cause:
+
+- account validation, backend discovery and every runtime relay generation each
+  constructed an independent `YiCameraManager`;
+- each manager called `/v4/users/login`, so account configuration logged in
+  twice and camera start/recreate/reprobe could log in once per child;
+- transport errors and runtime restarts had no shared authenticated state to
+  reuse even when the existing YI token was still valid.
+
+Architecture:
+
+```text
+App process
+ -> one YiCloudSession (one lock, one generation)
+ -> one YiCameraManager holds userid/token/token_secret + inventory + TNP cache
+ -> /v4/devices/list and /v4/tnp/device_info reuse that session
+
+runtime lifecycle / reprobe
+ -> scrubbed child environment + stable_id + private UDS path
+ -> 0700 socket directory / 0600 Unix socket / SO_PEERCRED on Linux
+ -> one bounded material request and response
+ -> existing PPPP/TNP relay, FFmpeg and go2rtc paths
+```
+
+`POST /api/v1/account` now validates the replacement credentials, fetches the
+camera list and adopts that exact authenticated manager before immediate
+discovery. Failed validation leaves the prior session and credential file
+untouched. The session is invalidated and the original cloud operation is
+retried exactly once only for the exact signed-endpoint YI code `20202`.
+Timeouts, transport failures, generic server failures, offline state, media
+stalls and watchdog restarts do not invalidate or relogin.
+
+Secret-safe health diagnostics now expose only:
+
+```text
+cloud_login_attempt_total
+cloud_login_success_total
+cloud_session_reuse_total
+cloud_relogin_total
+session_generation
+last_cloud_login_reason (allow-listed values only)
+```
+
+Final cloud login call graph:
+
+```text
+initial discovery / first account demand
+ -> YiCloudSession.ensure_session
+ -> YiCameraManager.login
+ -> GET /v4/users/login
+
+explicit account replacement
+ -> YiCloudSession.replace_credentials
+ -> candidate YiCameraManager.login
+ -> GET /v4/users/login
+ -> devices/list validation
+ -> persist/apply credentials
+ -> adopt the same candidate session
+
+signed cloud operation returns YI 20202
+ -> generation-checked invalidation
+ -> one YiCameraManager.login by the waiting caller
+ -> retry original operation once
+```
+
+Final runtime-material call graph:
+
+```text
+camera start / recreate / watchdog / reprobe
+ -> lifecycle starts scrubbed stable relay (no env file)
+ -> private UDS request {stable_id}
+ -> App YiCloudSession.runtime_material
+ -> cached inventory/TNP or refresh through the current token
+ -> one camera-specific CameraMaterial response
+ -> unchanged native PPPP/TNP + H264/AAC + FFmpeg path
+```
+
+Expected `/v4/users/login` counts with a healthy in-memory session:
+
+```text
+App startup initial discovery:       1
+each 5-minute HA refresh:            0 additional
+camera start:                        0 additional
+watchdog recreation:                 0 additional
+five simultaneous camera starts:    0 additional (1 total if they are the first demand)
+explicit account replacement:        1
+confirmed YI 20202 expiry:            1 relogin, then one operation retry
+```
+
+Files changed:
+
+- `yi_cloud_session.py` (new session owner and UDS broker/client);
+- `yi_camera_manager.py`, `yi_camera_runtime.py`, `yi_cloud_probe.py`;
+- `yi_account_credentials.py`, `yi_addon_backend.py`,
+  `yi_persistent_backend.py`, `yi_online_status.py`, `yi_addon_service.py`;
+- `yi_runtime_lifecycle.py`, `yi_capability_probe_runtime.py`,
+  `yi_native_av_relay_stable.py`, `yi_native_av_relay.py`;
+- `yi_home/apparmor.txt`;
+- `tests/test_yi_cloud_session.py`, `tests/test_yi_runtime_policy.py`;
+- `checkpoint.md`.
+
+Test evidence on the Windows development host:
+
+```text
+focused cloud-session gates: 13 run, 12 PASS, 1 SKIP (AF_UNIX unavailable)
+focused compileall: PASS
+relevant cross-platform regressions: 39 run, 38 PASS, 1 SKIP (AF_UNIX unavailable)
+full suite: 125 run, 114 PASS, 3 SKIP
+```
+
+The remaining full-suite results are development-host constraints already
+present in this checkout: Windows does not expose Linux `AF_UNIX` in the
+available Python, POSIX `0600` mode assertions report `0666`, `os.fchmod` is
+unavailable, and the ignored APK feature assets used by model-mapping tests are
+absent. The Linux-only UDS permission/peer-credential test is therefore pending
+the explicitly approved HA/Linux deployment-validation step.
+
+Deployment state: **NOT DEPLOYED**. No Home Assistant, App, camera, go2rtc or
+Frigate state was changed. FFmpeg/H264/AAC logic, PPPP/TNP timing/control,
+watchdog timeout values and publication behavior were not changed.
 
 ## zforce native-record probe — DEPLOYED AND COLLECTED
 

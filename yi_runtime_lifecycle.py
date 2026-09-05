@@ -29,6 +29,26 @@ _SAFE_PROBE_PREFIXES = (
     "[phase3g-relay] native_record_probe=",
     "[phase3g-relay] native_video_payload_probe=",
 )
+_RUNTIME_SECRET_ENV_KEYS = frozenset(
+    {
+        "YI_REGION",
+        "YI_COUNTRY",
+        "YI_ACCOUNT",
+        "YI_PASSWORD",
+        "YI_DEVICE_BRAND",
+        "YI_DEVICE_MODEL",
+        "YI_ANDROID_VERSION",
+        "YI_LANGUAGE",
+        "YI_ADDON_API_TOKEN",
+    }
+)
+
+
+def runtime_child_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+    child = dict(os.environ if environment is None else environment)
+    for key in _RUNTIME_SECRET_ENV_KEYS:
+        child.pop(key, None)
+    return child
 
 
 def _runtime_probe_lines(path: Path, offset: int) -> list[str]:
@@ -80,15 +100,18 @@ class RuntimeLifecycleConfig:
     media_ingest_host: str | None = None
     media_ingest_port: int | None = None
     media_ingest_timeout: float = 5.0
+    material_socket: Path | None = None
 
     def validate(self) -> None:
         if not Path(self.python).is_file():
             raise RuntimeError(f"runtime python missing: {self.python}")
-        for path, label in (
-            (self.env_file, "env file"),
+        paths = [
             (self.stable_relay, "stable relay"),
             (self.supervisor, "supervisor"),
-        ):
+        ]
+        if self.material_socket is None:
+            paths.insert(0, (self.env_file, "env file"))
+        for path, label in paths:
             if not path.is_file():
                 raise RuntimeError(f"{label} missing: {path}")
         if not self.runtime_root.is_dir():
@@ -170,7 +193,7 @@ class _CameraRuntimeController:
 
     def _command(self) -> list[str]:
         cfg = self.config
-        return [
+        command = [
             cfg.python,
             str(cfg.supervisor),
             "--startup-timeout",
@@ -184,8 +207,12 @@ class _CameraRuntimeController:
             str(cfg.stable_relay),
             "--stable-id",
             self.stable_id,
-            "--env-file",
-            str(cfg.env_file),
+        ]
+        if cfg.material_socket is not None:
+            command.extend(("--material-socket", str(cfg.material_socket)))
+        else:
+            command.extend(("--env-file", str(cfg.env_file)))
+        command.extend([
             "--runtime",
             str(cfg.runtime_root),
             "--worker-dir",
@@ -197,7 +224,8 @@ class _CameraRuntimeController:
             "--ffprobe",
             cfg.ffprobe,
             "--stdout",
-        ]
+        ])
+        return command
 
     def _terminate_process(self, process: subprocess.Popen[bytes]) -> None:
         if process.poll() is not None:
@@ -334,6 +362,7 @@ class _CameraRuntimeController:
                             stdout=(subprocess.PIPE if self.config.media_publisher_enabled else subprocess.DEVNULL),
                             stderr=log_stream,
                             start_new_session=True,
+                            env=runtime_child_environment(),
                         )
                     except Exception:
                         log_stream.close()
@@ -586,6 +615,7 @@ def build_default_config(
     media_ingest_host: str | None = None,
     media_ingest_port: int | None = None,
     media_ingest_timeout: float = 5.0,
+    material_socket: Path | None = None,
 ) -> RuntimeLifecycleConfig:
     project_root = (root or Path(__file__).resolve().parent).resolve()
     selected_runtime = (runtime_root or project_root / ".analysis" / "phase3" / "bionic-root").resolve()
@@ -600,6 +630,7 @@ def build_default_config(
         stable_relay=project_root / "yi_native_av_relay_stable.py",
         supervisor=project_root / "yi_native_session_supervisor.py",
         state_dir=(state_dir or default_runtime_state_dir()).resolve(),
+        material_socket=material_socket.resolve() if material_socket is not None else None,
         startup_timeout=startup_timeout,
         stall_timeout=stall_timeout,
         terminate_grace=terminate_grace,

@@ -14,7 +14,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 import yi_cloud_probe as cloud
-from yi_camera_manager import CameraDevice, YiCameraManager
+from yi_camera_manager import CameraDevice
+from yi_cloud_session import YiCloudSession
 from yi_capability_cache import CapabilityRecord, YiCapabilityCache
 from yi_capability_probe_runtime import CapabilityProbeError, YiCapabilityProbe
 from yi_media_publisher import YiGo2RTCPublisher
@@ -106,12 +107,14 @@ class YiAddonBackend:
         lifecycle: YiRuntimeLifecycleManager | None = None,
         capability_probe: YiCapabilityProbe | None = None,
         media_publisher: YiGo2RTCPublisher | None = None,
+        cloud_session: YiCloudSession | None = None,
     ) -> None:
         self.timeout = timeout
         self.capability_cache = capability_cache or YiCapabilityCache()
         self.lifecycle = lifecycle
         self.capability_probe = capability_probe
         self.media_publisher = media_publisher
+        self.cloud_session = cloud_session if cloud_session is not None else YiCloudSession(timeout=timeout)
         self._lock = threading.RLock()
         self._cameras: dict[str, CameraState] = {}
         self._last_discovery_at: str | None = None
@@ -174,10 +177,9 @@ class YiAddonBackend:
             return False, self._runtime_for(stable_id)
         return bool(runtime.get("desired_running")), runtime
 
-    def discover(self, *, fetch_tnp: bool = True) -> dict[str, Any]:
-        manager = YiCameraManager(timeout=self.timeout)
+    def discover(self, *, fetch_tnp: bool = True, reason: str = "manual_discovery") -> dict[str, Any]:
         try:
-            devices = manager.discover(fetch_tnp=fetch_tnp)
+            devices = self.cloud_session.discover(fetch_tnp=fetch_tnp, reason=reason)
             snapshot = {
                 device.stable_id: CameraState(device=device, capability=self._capability_for(device.stable_id))
                 for device in devices
@@ -187,9 +189,6 @@ class YiAddonBackend:
             with self._lock:
                 self._last_error = safe
             raise
-        finally:
-            manager.close()
-
         publisher_ready = False
         publisher_error: dict[str, str] | None = None
         if self.media_publisher is not None:
@@ -246,6 +245,7 @@ class YiAddonBackend:
             "managed_runtime_count": self.lifecycle.managed_count() if self.lifecycle is not None else 0,
             "media_publisher": publisher,
             "media_publisher_error": publisher_error,
+            "cloud_session": self.cloud_session.safe_status(),
             "secrets_exposed": False,
         }
 
@@ -449,3 +449,4 @@ class YiAddonBackend:
             self.lifecycle.shutdown_all()
         if self.media_publisher is not None:
             self.media_publisher.stop()
+        self.cloud_session.close()

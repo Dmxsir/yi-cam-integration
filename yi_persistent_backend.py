@@ -15,7 +15,6 @@ import threading
 from typing import Any
 
 from yi_addon_backend import CameraState, YiAddonBackend, _safe_error, _utc_now
-from yi_camera_manager import YiCameraManager
 from yi_online_status import AvailabilityRecord, YiOnlineStatusProbe
 from yi_runtime_policy import YiRuntimePolicyStore
 
@@ -252,13 +251,12 @@ class YiPersistentAddonBackend(YiAddonBackend):
             "secrets_exposed": False,
         }
 
-    def discover(self, *, fetch_tnp: bool = True) -> dict[str, Any]:
-        manager = YiCameraManager(timeout=self.timeout)
+    def discover(self, *, fetch_tnp: bool = True, reason: str = "manual_discovery") -> dict[str, Any]:
         availability: dict[str, AvailabilityRecord] = {}
         try:
-            devices = manager.discover(fetch_tnp=fetch_tnp)
+            devices = self.cloud_session.discover(fetch_tnp=fetch_tnp, reason=reason)
             if self.availability_probe is not None:
-                availability = self.availability_probe.sync_and_probe(manager, devices)
+                availability = self.availability_probe.sync_and_probe(self.cloud_session.tnp_info, devices)
             else:
                 availability = {
                     device.stable_id: AvailabilityRecord.unknown(source="not_configured")
@@ -276,9 +274,6 @@ class YiPersistentAddonBackend(YiAddonBackend):
             with self._lock:
                 self._last_error = safe
             raise
-        finally:
-            manager.close()
-
         publisher_ready = False
         publisher_error: dict[str, str] | None = None
         if self.media_publisher is not None:

@@ -16,9 +16,9 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
-from yi_camera_manager import CameraDevice, YiCameraManager
+from yi_camera_manager import CameraDevice
 
 SOURCE = "pppp_check_dev_online"
 STABLE_ID_RE = re.compile(r"^[0-9a-f]{20}$")
@@ -176,7 +176,7 @@ class YiOnlineStatusProbe:
 
     def sync_and_probe(
         self,
-        manager: YiCameraManager,
+        tnp_info_for: Callable[[str], Mapping[str, Any]],
         devices: Iterable[CameraDevice],
     ) -> dict[str, AvailabilityRecord]:
         materials: dict[str, tuple[str, str]] = {}
@@ -187,7 +187,7 @@ class YiOnlineStatusProbe:
                 results[stable_id] = AvailabilityRecord.unknown(source="unsupported_transport")
                 continue
             try:
-                info = manager._tnp_info(stable_id)  # engine-internal, never exposed
+                info = tnp_info_for(stable_id)  # engine-internal, never exposed
                 p2pid = info.get("DID")
                 server = info.get("InitString")
                 if not isinstance(p2pid, str) or not p2pid or not isinstance(server, str) or not server:

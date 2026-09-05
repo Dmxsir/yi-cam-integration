@@ -3,7 +3,9 @@
 
 The service exposes only secret-safe backend/runtime state. Optional managed
 go2rtc publication keeps media publishing inside the App while PPPP/TNP session
-ownership remains in the per-camera lifecycle manager. When --data-dir is set,
+ownership remains in the per-camera lifecycle manager. The App owns the YI
+cloud session and hands only per-camera runtime material to scrubbed children.
+When --data-dir is set,
 non-secret capability/runtime intent is persisted there for App restarts.
 """
 
@@ -27,6 +29,7 @@ from yi_account_credentials import YiAccountCredentialError, YiAccountCredential
 from yi_addon_backend import YiAddonBackend
 from yi_capability_cache import YiCapabilityCache
 from yi_capability_probe_runtime import YiCapabilityProbe
+from yi_cloud_session import YiCloudSession, YiMaterialBroker
 from yi_media_publisher import Go2RTCPublisherConfig, YiGo2RTCPublisher
 from yi_persistent_backend import YiPersistentAddonBackend
 from yi_runtime_lifecycle import (
@@ -208,12 +211,16 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
                 return
             with self.server.account_lock:
                 try:
-                    account_result = store.configure(payload, timeout=self.server.account_timeout)
+                    account_result = store.configure(
+                        payload,
+                        timeout=self.server.account_timeout,
+                        cloud_session=self.server.backend.cloud_session,
+                    )
                 except YiAccountCredentialError as exc:
                     self._error(_credential_http_status(exc.code), exc.code, exc.safe_message)
                     return
                 try:
-                    discovery = self.server.backend.discover(fetch_tnp=True)
+                    discovery = self.server.backend.discover(fetch_tnp=True, reason="account_replace")
                 except Exception:
                     self._json(
                         HTTPStatus.BAD_GATEWAY,
@@ -248,7 +255,7 @@ class YiAddonRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/discover":
             try:
-                result = self.server.backend.discover(fetch_tnp=True)
+                result = self.server.backend.discover(fetch_tnp=True, reason="ha_discovery")
             except Exception:
                 self._error(HTTPStatus.BAD_GATEWAY, "discovery_failed", "YI camera discovery failed.")
             else:
@@ -337,6 +344,7 @@ def main() -> int:
             pass
 
     credential_store = YiAccountCredentialStore(args.env_file) if args.env_file is not None else None
+    cloud_session = YiCloudSession(timeout=args.timeout)
 
     selected_runtime_state = args.runtime_state_dir
     if selected_runtime_state is None and data_dir is not None:
@@ -364,9 +372,12 @@ def main() -> int:
     capability_cache = YiCapabilityCache(data_dir / "capabilities.json" if data_dir is not None else None)
     lifecycle: YiRuntimeLifecycleManager | None = None
     capability_probe: YiCapabilityProbe | None = None
+    material_broker: YiMaterialBroker | None = None
     if not args.disable_lifecycle:
         if args.env_file is None:
             raise SystemExit("--env-file is required unless --disable-lifecycle is used")
+        broker_parent = data_dir or (selected_runtime_state or default_runtime_state_dir())
+        material_socket = broker_parent / "cloud-material.sock"
         config = build_default_config(
             env_file=args.env_file,
             root=Path(__file__).resolve().parent,
@@ -380,6 +391,7 @@ def main() -> int:
             max_restart_delay=args.max_restart_delay,
             media_ingest_host=(media_publisher.ingest_host if media_publisher is not None else None),
             media_ingest_port=(media_publisher.ingest_port if media_publisher is not None else None),
+            material_socket=material_socket,
         )
         lifecycle = YiRuntimeLifecycleManager(config)
         capability_probe = YiCapabilityProbe(
@@ -394,6 +406,7 @@ def main() -> int:
         "lifecycle": lifecycle,
         "capability_probe": capability_probe,
         "media_publisher": media_publisher,
+        "cloud_session": cloud_session,
     }
     if data_dir is not None:
         backend: YiAddonBackend = YiPersistentAddonBackend(
@@ -403,10 +416,22 @@ def main() -> int:
     else:
         backend = YiAddonBackend(**backend_kwargs)
 
+    if lifecycle is not None:
+        material_socket = lifecycle.config.material_socket
+        if material_socket is None:
+            backend.shutdown()
+            raise SystemExit("private runtime-material socket is not configured")
+        material_broker = YiMaterialBroker(material_socket, cloud_session)
+        try:
+            material_broker.start()
+        except RuntimeError:
+            backend.shutdown()
+            raise SystemExit("private runtime-material broker failed to start")
+
     initial_discovery_ok = args.no_initial_discovery
     if not args.no_initial_discovery:
         try:
-            backend.discover(fetch_tnp=True)
+            backend.discover(fetch_tnp=True, reason="initial_discovery")
         except Exception:
             # Keep the service alive. Persistent runtime intent remains pending
             # and the retry loop below will reconcile it after cloud recovery.
@@ -440,7 +465,7 @@ def main() -> int:
         def retry_initial_discovery() -> None:
             while not stopping.wait(args.discovery_retry_interval):
                 try:
-                    backend.discover(fetch_tnp=True)
+                    backend.discover(fetch_tnp=True, reason="initial_discovery")
                 except Exception:
                     continue
                 return
@@ -461,6 +486,7 @@ def main() -> int:
                 "port": args.port,
                 "authentication": "bearer" if token is not None else "loopback_only",
                 "runtime_lifecycle_ready": lifecycle is not None,
+                "runtime_material_broker_ready": material_broker is not None,
                 "reprobe_ready": capability_probe is not None,
                 "media_publisher_enabled": media_publisher is not None,
                 "persistence_enabled": data_dir is not None,
@@ -482,6 +508,8 @@ def main() -> int:
     finally:
         stopping.set()
         backend.shutdown()
+        if material_broker is not None:
+            material_broker.close()
         server.server_close()
     return 0
 

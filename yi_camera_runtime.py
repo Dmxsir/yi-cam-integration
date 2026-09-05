@@ -81,9 +81,25 @@ def runtime_material_for(stable_id: str, *, timeout: float = 10.0) -> tuple[Came
     manager = YiCameraManager(timeout=timeout)
     material: CameraMaterial | None = None
     try:
-        devices = manager.discover(fetch_tnp=False)
-        selected = _select_device(devices, stable_id)
-        material = manager.material_for(stable_id)
+        material, descriptor = runtime_material_from_manager(manager, stable_id)
+        return material, descriptor
+    except Exception:
+        if material is not None:
+            material.clear()
+        raise
+    finally:
+        manager.close()
+
+
+def runtime_material_from_manager(
+    manager: YiCameraManager,
+    stable_id: str,
+) -> tuple[CameraMaterial, RuntimeDescriptor]:
+    """Resolve runtime material through an already authenticated manager."""
+    devices = manager.discover(fetch_tnp=False)
+    selected = _select_device(devices, stable_id)
+    material = manager.material_for(stable_id)
+    try:
         profile, profile_source = _profile_for(stable_id)
         descriptor = RuntimeDescriptor(
             stable_id=selected.stable_id,
@@ -100,8 +116,5 @@ def runtime_material_for(stable_id: str, *, timeout: float = 10.0) -> tuple[Came
         )
         return material, descriptor
     except Exception:
-        if material is not None:
-            material.clear()
+        material.clear()
         raise
-    finally:
-        manager.close()

@@ -174,6 +174,7 @@ def _safe_failure_message(category: str) -> str:
     return {
         "unsupported_api": "The configured YI endpoint or method appears unsupported.",
         "invalid_credentials": "YI rejected the login credentials.",
+        "session_expired": "The YI cloud session expired.",
         "mfa_or_challenge": "YI appears to require an MFA, CAPTCHA, or verification challenge.",
         "rate_limit": "YI rate-limited the request.",
         "server_rejection": "YI rejected the request; use the HTTP status and YI code for diagnosis.",
@@ -198,6 +199,17 @@ def _failure_category(http_status: int | None, server_message: str, auth_request
     ):
         return "invalid_credentials"
     return "server_rejection"
+
+
+def _response_failure_category(
+    http_status: int | None,
+    yi_code: int | None,
+    server_message: str,
+    auth_request: bool,
+) -> str:
+    if not auth_request and yi_code == 20202:
+        return "session_expired"
+    return _failure_category(http_status, server_message, auth_request)
 
 
 def _json_value(raw: bytes) -> Any:
@@ -612,7 +624,7 @@ def get_json(
         payload = _json_object(raw)
         status = exc.code
         yi_code = _response_code(payload)
-        category = _failure_category(status, _response_message(payload), auth_request)
+        category = _response_failure_category(status, yi_code, _response_message(payload), auth_request)
         diagnostic = _diagnostic(host, path, status, yi_code, False, category)
         if debug_response_shape:
             diagnostic.update(response_shape(raw, exc.headers, path))
@@ -625,7 +637,7 @@ def get_json(
     payload = _json_object(raw)
     if status != 200:
         yi_code = _response_code(payload)
-        category = _failure_category(status, _response_message(payload), auth_request)
+        category = _response_failure_category(status, yi_code, _response_message(payload), auth_request)
         diagnostic = _diagnostic(host, path, status, yi_code, False, category)
         if debug_response_shape:
             diagnostic.update(response_shape(raw, response_headers, path))
@@ -639,7 +651,7 @@ def get_json(
 
     yi_code = _response_code(payload)
     if yi_code != 20000:
-        category = _failure_category(status, _response_message(payload), auth_request)
+        category = _response_failure_category(status, yi_code, _response_message(payload), auth_request)
         diagnostic = _diagnostic(host, path, status, yi_code, False, category)
         if debug_response_shape:
             diagnostic.update(response_shape(raw, response_headers, path))
