@@ -1,7 +1,7 @@
 # YI Camera Connect / YI RTSP — Project Checkpoint
 
-_Last updated: 2026-09-05_
-_Branch: `phase-3-linux-pppp`  
+_Last updated: 2026-09-06_
+_Branch: `codex/issue-2-vendor-bootstrap`
 _Repository: `Dmxsir/yi-cam-integration`
 
 ## Purpose
@@ -52,6 +52,77 @@ YI camera
 ```
 
 The App owns the PPPP/TNP session. Home Assistant and Frigate consume the App-owned RTSP stream and do not create independent YI sessions.
+
+## Issue #2 vendor bootstrap — HAOS VALIDATED
+
+Validated source commit: `81dd900b674c1153e249d03cb4cdc9b142e7950a`.
+
+The Local App bundle built successfully after removing the stale Dockerfile
+assertion that required `libPPPP_API.so` inside the image. Real HAOS deployment
+requires this order so Supervisor refreshes changed Local App metadata before
+rebuilding:
+
+```text
+copy local App
+ -> ha store reload
+ -> ha apps rebuild local_yi_home
+ -> ha apps start local_yi_home
+```
+
+The first successful startup imported the official user-supplied APK from
+`/share/yi_rtsp/yi-home.apk`:
+
+```text
+vendor_runtime=installed; source=official_apk; size=243264; sha256=8c53f2ecc7ce6c362960af29a5d8de8396347a120dc10e88b24928437c4286eb; proprietary_bytes_exposed=false
+```
+
+After an App restart, the persisted private copy was reused without reading the
+APK again:
+
+```text
+vendor_runtime=reused; source=private_data; size=243264; sha256=8c53f2ecc7ce6c362960af29a5d8de8396347a120dc10e88b24928437c4286eb; proprietary_bytes_exposed=false
+```
+
+The backend restarted successfully with:
+
+```text
+runtime_lifecycle_ready=true
+runtime_material_broker_ready=true
+media_publisher_enabled=true
+persistence_enabled=true
+managed_runtime_count=5
+account_configured=true
+initial_discovery_ok=true
+secrets_exposed=false
+```
+
+Home Assistant discovery republished successfully. The user confirmed that all
+camera live streams were visible through the HA integration after restart,
+proving that native/QEMU media recovered through the persisted private vendor
+library.
+
+```text
+Issue #2 HAOS bootstrap validation: PASS
+Issue #2 persistence validation: PASS
+Issue #2 end-to-end media validation: PASS
+```
+
+Validation findings:
+
+1. The stale Dockerfile assertion requiring `libPPPP_API.so` inside the image
+   was a real packaging bug and is fixed in `81dd900`.
+2. `ha apps rebuild` alone can reuse stale Supervisor Local App metadata. After
+   changing Local App configuration, `ha store reload` is required before the
+   rebuild.
+
+Security conclusions remain unchanged:
+
+- no YI APK in Git;
+- no `libPPPP_API.so` in Git;
+- no proprietary vendor bytes in the Docker context, image or release;
+- `/share` remains read-only;
+- the extracted vendor library remains private under `/data`;
+- no protected PPPP/media/runtime behavior was changed.
 
 ## App-owned YI cloud session — IMPLEMENTED, NOT DEPLOYED
 

@@ -27,9 +27,9 @@ for file in \
   "$APP_DIR/run.sh" \
   "$APP_DIR/apparmor.txt" \
   "$APP_DIR/rootfs/opt/yi-home/app/yi_addon_service.py" \
+  "$APP_DIR/rootfs/opt/yi-home/app/yi_vendor_bootstrap.py" \
   "$APP_DIR/rootfs/opt/yi-home/runtime/bionic-root/system/bin/linker64" \
-  "$APP_DIR/rootfs/opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/android_pppp_online_probe" \
-  "$APP_DIR/rootfs/opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/libPPPP_API.so"; do
+  "$APP_DIR/rootfs/opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/android_pppp_online_probe"; do
   [[ -e "$file" ]] || fail "required Local App artifact missing: $file"
 done
 echo "local_app_required_artifacts=PASS"
@@ -50,6 +50,11 @@ LEAKED="$(find "$APP_DIR/rootfs" -type f \( \
   \) -print -quit)"
 [[ -z "$LEAKED" ]] || fail "credential/state file present in Local App rootfs: $LEAKED"
 echo "local_app_secret_state_scan=PASS"
+
+if find "$APP_DIR" \( -iname 'libPPPP_API.so' -o -iname 'yi-home.apk' \) -print -quit | grep -q .; then
+  fail "proprietary vendor artifact exists in Local App Docker context"
+fi
+echo "local_app_vendor_artifact_scan=PASS"
 
 # Reject actual development-host paths everywhere in the package. A few engine
 # modules intentionally retain a repo-relative .analysis fallback for legacy
@@ -96,10 +101,14 @@ sha256sum "$BUNDLE" >"$SHA_FILE"
 if tar -tzf "$BUNDLE" | grep -Eq '(^|/)(\.env|\.env\.local|options\.json|backend-api-token|runtime-policy\.json|capabilities\.json|yi\.env)$'; then
   fail "forbidden credential/state filename exists in Local App archive"
 fi
+if tar -tzf "$BUNDLE" | grep -Eiq '(^|/)(libPPPP_API\.so|yi-home\.apk)$'; then
+  fail "proprietary vendor artifact exists in Local App archive"
+fi
 
 echo "local_app_bundle=$BUNDLE"
 echo "local_app_bundle_sha256_file=$SHA_FILE"
 echo "local_app_bundle_bytes=$(stat -c %s "$BUNDLE")"
 echo "local_app_bundle_secret_scan=PASS"
+echo "local_app_bundle_vendor_artifact_scan=PASS"
 echo "production_modified=false"
 echo "PHASE6D_LOCAL_APP_BUNDLE=PASS"

@@ -35,6 +35,9 @@ Current internal `yi_home` identifiers remain unchanged until the explicit compa
 - go2rtc 1.9.14 pinned by SHA-256.
 - Bionic/native PPPP runtime staged without development credentials/state.
 - Local App bootstrap proven as `local_yi_home` from `/addons/yi_home`.
+- Issue #2 user-supplied vendor bootstrap: **HAOS bootstrap, restart persistence and end-to-end media PASS** at `81dd900`.
+- The validated deployment order is `copy local App` → `ha store reload` → `ha apps rebuild local_yi_home` → `ha apps start local_yi_home`.
+- The official APK remains outside Git and the image; `/share` is read-only and the validated private library is reused from `/data` after restart.
 
 ### Phase 6D.2 — Configuration, storage and secrets — COMPLETE
 

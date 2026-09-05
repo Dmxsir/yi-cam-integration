@@ -17,5 +17,7 @@ current-client-decompiled/
 current-client-full/
 current-native-analysis/
 com.ants360.yicamera.international.apk
+yi-home.apk
+libPPPP_API.so
 *.secrets.json
 yi-cloud-*.json

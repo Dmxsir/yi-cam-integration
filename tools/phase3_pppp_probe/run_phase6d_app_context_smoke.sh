@@ -26,9 +26,9 @@ for file in \
   "$APP_DIR/run.sh" \
   "$APP_DIR/apparmor.txt" \
   "$ROOTFS/opt/yi-home/app/yi_addon_service.py" \
+  "$ROOTFS/opt/yi-home/app/yi_vendor_bootstrap.py" \
   "$RUNTIME/system/bin/linker64" \
   "$RUNTIME/data/local/tmp/yi-online-status/android_pppp_online_probe" \
-  "$RUNTIME/data/local/tmp/yi-online-status/libPPPP_API.so" \
   "$ROOTFS/opt/yi-home/runtime-manifest.json"; do
   [[ -e "$file" ]] || fail "required App artifact missing: $file"
 done
@@ -38,6 +38,11 @@ if find "$ROOTFS" -type f \( -name '.env' -o -name '.env.local' -o -name 'option
   fail "secret/state file leaked into generated build context"
 fi
 echo "build_context_secret_scan=PASS"
+
+if find "$APP_DIR" \( -iname 'libPPPP_API.so' -o -iname 'yi-home.apk' \) -print -quit | grep -q .; then
+  fail "proprietary vendor artifact leaked into Docker build context"
+fi
+echo "build_context_vendor_artifact_scan=PASS"
 
 if grep -REn '(~/Documents|/home/[^/]+/Documents|\.analysis/phase3)' \
     "$APP_DIR/Dockerfile" "$APP_DIR/run.sh" >/dev/null; then
@@ -53,6 +58,16 @@ if grep -Eq '^(host_network|full_access|docker_api):[[:space:]]*true' "$APP_DIR/
 fi
 if ! grep -q '^discovery:' "$APP_DIR/config.yaml" || ! grep -q '  - yi_home' "$APP_DIR/config.yaml"; then
   fail "Supervisor discovery service is not declared"
+fi
+if ! awk '
+  /^map:[[:space:]]*$/ { in_map=1; next }
+  in_map && /^[^[:space:]]/ { in_map=0 }
+  in_map && /^[[:space:]]*-[[:space:]]*share:ro[[:space:]]*$/ { found=1 }
+  in_map && /^[[:space:]]*-[[:space:]]*type:[[:space:]]*share[[:space:]]*$/ { share_dict=1; next }
+  in_map && share_dict && /^[[:space:]]*read_only:[[:space:]]*true[[:space:]]*$/ { found=1 }
+  END { exit !found }
+' "$APP_DIR/config.yaml"; then
+  fail "read-only /share import mapping is not declared"
 fi
 echo "app_security_config=PASS"
 
@@ -88,17 +103,16 @@ fi
 if ! grep -q -- '--data-dir /data' "$APP_DIR/run.sh"; then
   fail "backend persistence is not rooted under /data"
 fi
+if ! grep -q 'yi_vendor_bootstrap.py' "$APP_DIR/run.sh" \
+    || ! grep -q -- '--share-dir /share/yi_rtsp' "$APP_DIR/run.sh"; then
+  fail "local vendor bootstrap is not wired before backend startup"
+fi
 if ! grep -q '"managed_runtime_count"' "$ROOTFS/opt/yi-home/app/yi_addon_service.py"; then
   fail "bootstrap runtime-count marker is missing"
 fi
 echo "startup_policy_wiring=PASS"
 echo "restart_persistence_markers=PASS"
-
-if ! readelf -Ws "$RUNTIME/data/local/tmp/yi-online-status/libPPPP_API.so" 2>/dev/null \
-    | grep -E '[[:space:]]PPPP_CheckDevOnline$' >/dev/null; then
-  fail "staged online-status PPPP library lacks PPPP_CheckDevOnline"
-fi
-echo "online_status_runtime_packaged=PASS"
+echo "vendor_runtime_packaged=false"
 
 mapfile -d '' PY_FILES < <(find "$ROOTFS/opt/yi-home/app" -maxdepth 1 -type f -name '*.py' -print0)
 [[ "${#PY_FILES[@]}" -gt 0 ]] || fail "no Python application modules were staged"

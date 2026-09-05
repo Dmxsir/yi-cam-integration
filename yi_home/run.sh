@@ -13,6 +13,16 @@ BACKEND_STOP_TIMEOUT_SECONDS=20
 mkdir -p /data
 chmod 0700 /data 2>/dev/null || true
 
+# Import the user-supplied official runtime once, then attach it at the two
+# proven Bionic guest paths. Only symlinks enter the ephemeral packaged tree;
+# the accepted vendor bytes remain under persistent private App data.
+python3 "${APP_ROOT}/yi_vendor_bootstrap.py" \
+  --data-dir /data \
+  --share-dir /share/yi_rtsp \
+  --runtime-root "${RUNTIME_ROOT}" \
+  || bashio::exit.nok \
+    "Vendor runtime unavailable. Place the official YI Home APK at /share/yi_rtsp/yi-home.apk."
+
 TOKEN_STATE="reused"
 if [[ ! -s "${TOKEN_FILE}" ]]; then
   TOKEN_STATE="created"

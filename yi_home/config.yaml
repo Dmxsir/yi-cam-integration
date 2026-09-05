@@ -12,6 +12,8 @@ stage: experimental
 apparmor: true
 discovery:
   - yi_home
+map:
+  - share:ro
 ports:
   8554/tcp: null
 ports_description:

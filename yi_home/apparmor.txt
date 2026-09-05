@@ -28,7 +28,10 @@ profile yi_home flags=(attach_disconnected,mediate_deleted) {
 
   # YI Home application, QEMU guest runtime and generated state.
   /opt/yi-home/{,**} rixm,
+  /opt/yi-home/runtime/bionic-root/data/local/tmp/yi-phase3g/libPPPP_API.so wl,
+  /opt/yi-home/runtime/bionic-root/data/local/tmp/yi-online-status/libPPPP_API.so wl,
   /data/{,**} rwk,
+  /share/yi_rtsp/{,**} r,
 
   # Runtime process/entropy access required by Python, FFmpeg and QEMU user mode.
   /dev/null rw,
