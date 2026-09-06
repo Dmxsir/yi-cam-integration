@@ -3,10 +3,10 @@
   "name": "YI Home",
   "codeowners": ["@Dmxsir"],
   "config_flow": true,
-  "dependencies": ["stream"],
+  "dependencies": ["hassio", "stream"],
   "documentation": "https://github.com/Dmxsir/yi-cam-integration",
   "issue_tracker": "https://github.com/Dmxsir/yi-cam-integration/issues",
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "0.1.1"
+  "version": "0.1.2"
 }
