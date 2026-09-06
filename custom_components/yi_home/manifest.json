@@ -1,11 +1,12 @@
 {
   "domain": "yi_home",
   "name": "YI Home",
-  "codeowners": [],
+  "codeowners": ["@Dmxsir"],
   "config_flow": true,
   "dependencies": ["stream"],
   "documentation": "https://github.com/Dmxsir/yi-cam-integration",
+  "issue_tracker": "https://github.com/Dmxsir/yi-cam-integration/issues",
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.1.1"
 }
