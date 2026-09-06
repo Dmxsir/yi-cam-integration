@@ -1,5 +1,7 @@
 # YI Home for Home Assistant
 
+![YI Home](custom_components/yi_home/brand/icon.png)
+
 Experimental Home Assistant integration for YI Home cameras.
 
 This project is split into two repositories:
